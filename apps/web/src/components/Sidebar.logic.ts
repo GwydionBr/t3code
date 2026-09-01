@@ -643,6 +643,64 @@ export function resolveSettledTimestamp(thread: SettledTimestampInput): string |
 
 // Settled rows are history, so they order by when the work ENDED, not when
 // the thread was created or last touched.
+export interface SidebarThreadBranchGroup<T> {
+  readonly key: string;
+  readonly label: string;
+  readonly branch: string | null;
+  readonly threads: readonly T[];
+}
+
+/**
+ * Sections an already-sorted active list by branch. Groups appear in the
+ * order their first (most recent) thread appears, so the branch with the
+ * newest activity stays on top and rows keep their relative order inside a
+ * group. Branch names only mean something within a project, so the group key
+ * carries the logical project key; `resolveProjectLabel` returning a string
+ * prefixes the label with it (for the all-projects scope). Threads without a
+ * branch collect in one trailing "No branch" group per project.
+ */
+export function groupThreadsByBranch<
+  T extends {
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly branch: string | null;
+  },
+>(
+  threads: readonly T[],
+  options: {
+    readonly resolveProjectKey: (thread: T) => string;
+    readonly resolveProjectLabel: (thread: T) => string | null;
+  },
+): SidebarThreadBranchGroup<T>[] {
+  const groupsByKey = new Map<string, { group: SidebarThreadBranchGroup<T>; threads: T[] }>();
+  for (const thread of threads) {
+    const projectKey = options.resolveProjectKey(thread);
+    const key = `${projectKey}\u0000${thread.branch ?? ""}`;
+    let entry = groupsByKey.get(key);
+    if (entry === undefined) {
+      const projectLabel = options.resolveProjectLabel(thread);
+      const branchLabel = thread.branch ?? "No branch";
+      const bucket: T[] = [];
+      entry = {
+        group: {
+          key,
+          label: projectLabel === null ? branchLabel : `${projectLabel} · ${branchLabel}`,
+          branch: thread.branch,
+          threads: bucket,
+        },
+        threads: bucket,
+      };
+      groupsByKey.set(key, entry);
+    }
+    entry.threads.push(thread);
+  }
+  const groups = [...groupsByKey.values()].map((entry) => entry.group);
+  return [
+    ...groups.filter((group) => group.branch !== null),
+    ...groups.filter((group) => group.branch === null),
+  ];
+}
+
 export function sortSettledThreadsForSidebar<
   T extends SettledTimestampInput & { readonly id: string },
 >(threads: readonly T[]): T[] {

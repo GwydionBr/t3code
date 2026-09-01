@@ -158,6 +158,14 @@ describe("ClientSettings sidebar", () => {
     );
   });
 
+  it("defaults thread grouping off and only accepts known modes", () => {
+    expect(decodeClientSettings({}).sidebarThreadGrouping).toBe("none");
+    expect(
+      decodeClientSettingsPatch({ sidebarThreadGrouping: "branch" }).sidebarThreadGrouping,
+    ).toBe("branch");
+    expect(() => decodeClientSettingsPatch({ sidebarThreadGrouping: "project" })).toThrow();
+  });
+
   it("keeps unpin confirmation opt-in and patchable", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
     expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);

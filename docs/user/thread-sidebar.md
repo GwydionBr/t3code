@@ -36,6 +36,14 @@ If reordering is unavailable for one environment, update the T3 Code server runn
 environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
 their pinned threads keep the default newest-first order below the ones you have arranged.
 
+## Grouping threads by branch
+
+Turn on **Settings → General → Group threads by branch** to section the active list by branch.
+Threads that share a branch sit under one heading, and the branch with the newest activity stays
+on top. When the sidebar shows all projects, each heading also names the project, since branch
+names only mean something inside a repository. Threads without a branch collect under **No
+branch** at the end of the list. Pinned, snoozed, and settled threads keep their own order.
+
 ## Environment artwork
 
 Dev and Nightly environments can identify themselves with artwork at the top of the sidebar and in

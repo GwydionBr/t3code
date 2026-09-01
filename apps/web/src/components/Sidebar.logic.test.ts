@@ -14,6 +14,7 @@ import {
   getFallbackThreadIdAfterDelete,
   getVisibleThreadsForProject,
   getProjectSortTimestamp,
+  groupThreadsByBranch,
   hasUnseenCompletion,
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
@@ -1734,5 +1735,70 @@ describe("sortLogicalProjectsForSidebar", () => {
         (project) => project.projectKey,
       ),
     ).toEqual(["logical-newer", "logical-older"]);
+  });
+});
+
+describe("groupThreadsByBranch", () => {
+  const thread = (id: string, projectId: string, branch: string | null) => ({
+    id,
+    environmentId: "env-local",
+    projectId,
+    branch,
+  });
+  const options = {
+    resolveProjectKey: (input: { projectId: string }) => input.projectId,
+    resolveProjectLabel: () => null,
+  };
+
+  it("keeps first-appearance order for groups and input order inside them", () => {
+    const groups = groupThreadsByBranch(
+      [
+        thread("t1", "p1", "feature/a"),
+        thread("t2", "p1", "main"),
+        thread("t3", "p1", "feature/a"),
+        thread("t4", "p1", "main"),
+      ],
+      options,
+    );
+    expect(groups.map((group) => group.label)).toEqual(["feature/a", "main"]);
+    expect(groups.map((group) => group.threads.map((entry) => entry.id))).toEqual([
+      ["t1", "t3"],
+      ["t2", "t4"],
+    ]);
+  });
+
+  it("never merges the same branch name across projects", () => {
+    const groups = groupThreadsByBranch(
+      [thread("t1", "p1", "main"), thread("t2", "p2", "main")],
+      options,
+    );
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.threads[0]?.id)).toEqual(["t1", "t2"]);
+  });
+
+  it("prefixes the project label when one is resolved", () => {
+    const groups = groupThreadsByBranch([thread("t1", "p1", "main")], {
+      ...options,
+      resolveProjectLabel: () => "t3code",
+    });
+    expect(groups[0]?.label).toBe("t3code · main");
+  });
+
+  it("collects branchless threads into a trailing group per project", () => {
+    const groups = groupThreadsByBranch(
+      [
+        thread("t1", "p1", null),
+        thread("t2", "p1", "main"),
+        thread("t3", "p2", null),
+        thread("t4", "p1", null),
+      ],
+      options,
+    );
+    expect(groups.map((group) => [group.label, group.threads.map((entry) => entry.id)])).toEqual([
+      ["main", ["t2"]],
+      ["No branch", ["t1", "t4"]],
+      ["No branch", ["t3"]],
+    ]);
+    expect(groups[1]?.branch).toBeNull();
   });
 });

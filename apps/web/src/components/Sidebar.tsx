@@ -143,6 +143,7 @@ import {
   sortPinnedThreadsForSidebar,
   sortSettledThreadsForSidebar,
   sortThreadsForSidebar,
+  groupThreadsByBranch,
   useThreadJumpHintVisibility,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
@@ -1737,6 +1738,7 @@ export default function Sidebar() {
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
+  const sidebarThreadGrouping = useClientSettings((s) => s.sidebarThreadGrouping);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const {
@@ -1929,6 +1931,17 @@ export default function Sidebar() {
       ),
     [projectGroups],
   );
+  const logicalProjectKeyByPhysicalKey = useMemo(
+    () =>
+      new Map(
+        projectGroups.flatMap((group) =>
+          group.memberProjects.map(
+            (project) => [`${project.environmentId}:${project.id}`, group.projectKey] as const,
+          ),
+        ),
+      ),
+    [projectGroups],
+  );
 
   const nowMinute = useNowMinute();
   // Snooze wake times are second-precise, so classifying with the quantized
@@ -2066,7 +2079,7 @@ export default function Sidebar() {
   const {
     pinnedThreads,
     reorderablePinnedKeys,
-    activeThreads,
+    activeThreads: ungroupedActiveThreads,
     snoozedThreads,
     settledThreads,
     snoozeNow,
@@ -2134,6 +2147,39 @@ export default function Sidebar() {
       snoozeNow: preciseNow,
     };
   }, [nowMinute, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
+
+  // Branch grouping only re-sections the inbox; the flattened group order
+  // becomes the active order everywhere else (keyboard traversal, jump
+  // hints, range select) so what the eye sees is what the keys walk.
+  const activeThreadGroups = useMemo(() => {
+    if (sidebarThreadGrouping !== "branch") return null;
+    // Branch names only disambiguate inside a project, so the heading names
+    // the project too whenever more than one could be on screen.
+    const showProjectLabel = scopedProjectGroup === null && projectGroups.length > 1;
+    return groupThreadsByBranch(ungroupedActiveThreads, {
+      resolveProjectKey: (thread) =>
+        logicalProjectKeyByPhysicalKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+        `${thread.environmentId}:${thread.projectId}`,
+      resolveProjectLabel: (thread) =>
+        showProjectLabel
+          ? (projectDisplayNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null)
+          : null,
+    });
+  }, [
+    logicalProjectKeyByPhysicalKey,
+    projectDisplayNameByKey,
+    projectGroups.length,
+    scopedProjectGroup,
+    sidebarThreadGrouping,
+    ungroupedActiveThreads,
+  ]);
+  const activeThreads = useMemo(
+    () =>
+      activeThreadGroups === null
+        ? ungroupedActiveThreads
+        : activeThreadGroups.flatMap((group) => group.threads),
+    [activeThreadGroups, ungroupedActiveThreads],
+  );
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
@@ -3883,8 +3929,33 @@ export default function Sidebar() {
                       />,
                     );
                   }
-                  for (const thread of activeThreads) {
-                    items.push(renderThreadRow(thread, "active"));
+                  if (activeThreadGroups === null) {
+                    for (const thread of activeThreads) {
+                      items.push(renderThreadRow(thread, "active"));
+                    }
+                  } else {
+                    for (const group of activeThreadGroups) {
+                      items.push(
+                        <li
+                          key={`branch-group:${group.key}`}
+                          data-thread-selection-safe
+                          data-testid="sidebar-branch-group-header"
+                          className="mb-1 mt-2 flex list-none items-center gap-1.5 px-2.5"
+                        >
+                          <GitBranchIcon
+                            aria-hidden
+                            className="size-3 shrink-0 text-muted-foreground/60"
+                          />
+                          <span className="truncate text-xs font-medium text-muted-foreground/70">
+                            {group.label}
+                          </span>
+                          <span className="h-px flex-1 bg-sidebar-border/60" />
+                        </li>,
+                      );
+                      for (const thread of group.threads) {
+                        items.push(renderThreadRow(thread, "active"));
+                      }
+                    }
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the
                   // way, never gone. The header always renders while anything
