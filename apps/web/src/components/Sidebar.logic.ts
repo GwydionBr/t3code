@@ -3,7 +3,7 @@ import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
-  activeThreadAnchorTimestampMs,
+  sortActiveThreadsByBranch,
   getThreadSortTimestamp,
   resolveSettledThreadTimestamp,
   sortThreads,
@@ -594,15 +594,14 @@ export function firstValidTimestamp(
 export function sortThreadsForSidebar<
   T extends {
     readonly id: string;
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly branch: string | null;
     readonly createdAt: string;
     readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[]): T[] {
-  return [...threads].toSorted(
-    (left, right) =>
-      activeThreadAnchorTimestampMs(right) - activeThreadAnchorTimestampMs(left) ||
-      left.id.localeCompare(right.id),
-  );
+  return sortActiveThreadsByBranch(threads);
 }
 
 // Pinned-reorder key math and the keyed sort live in client-runtime

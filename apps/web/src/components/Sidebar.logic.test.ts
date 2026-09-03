@@ -810,9 +810,13 @@ describe("reduceSidebarProjectScopeMenuState", () => {
 });
 
 describe("sortThreadsForSidebar", () => {
-  const sortable = (input: { id: string; createdAt: string }) => ({
+  const sortable = (input: { id: string; createdAt: string; unsettledAt?: string }) => ({
     id: input.id,
     createdAt: input.createdAt,
+    unsettledAt: input.unsettledAt,
+    environmentId: "env-1",
+    projectId: "project-1",
+    branch: null,
   });
 
   it("orders by creation time, newest first, ignoring activity", () => {
@@ -836,11 +840,11 @@ describe("sortThreadsForSidebar", () => {
 
   it("surfaces an un-settled thread at the top via its re-entry stamp", () => {
     const sorted = sortThreadsForSidebar([
-      {
+      sortable({
         id: "old-unsettled",
         createdAt: "2026-03-09T08:00:00.000Z",
         unsettledAt: "2026-03-09T13:00:00.000Z",
-      },
+      }),
       sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
       sortable({ id: "middle", createdAt: "2026-03-09T10:00:00.000Z" }),
     ]);
@@ -850,15 +854,29 @@ describe("sortThreadsForSidebar", () => {
 
   it("ignores a re-entry stamp older than the thread's creation", () => {
     const sorted = sortThreadsForSidebar([
-      {
+      sortable({
         id: "stale-stamp",
         createdAt: "2026-03-09T10:00:00.000Z",
         unsettledAt: "2026-03-09T09:00:00.000Z",
-      },
+      }),
       sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "stale-stamp"]);
+  });
+
+  it("keeps threads on the same branch together, ordered by the newest group member", () => {
+    const onBranch = (id: string, branch: string, createdAt: string) => ({
+      ...sortable({ id, createdAt }),
+      branch,
+    });
+    const sorted = sortThreadsForSidebar([
+      onBranch("feature-old", "feature", "2026-03-09T08:00:00.000Z"),
+      onBranch("other", "other", "2026-03-09T11:00:00.000Z"),
+      onBranch("feature-new", "feature", "2026-03-09T12:00:00.000Z"),
+    ]);
+
+    expect(sorted.map((thread) => thread.id)).toEqual(["feature-new", "feature-old", "other"]);
   });
 });
 

@@ -9,9 +9,9 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import {
-  activeThreadAnchorTimestampMs,
   resolveSettledThreadTimestamp,
   sortPinnedThreadsByOrderKey,
+  sortActiveThreadsByBranch,
 } from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
@@ -161,17 +161,16 @@ function parseTimestampMs(isoDate: string): number {
 export function sortThreadsForListV2<
   T extends {
     readonly id: string;
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly branch: string | null;
     readonly createdAt: string;
     readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[]): T[] {
   // .sort() on a copy, not .toSorted(): Hermes doesn't ship the ES2023
   // change-by-copy array methods.
-  return [...threads].sort(
-    (left, right) =>
-      activeThreadAnchorTimestampMs(right) - activeThreadAnchorTimestampMs(left) ||
-      left.id.localeCompare(right.id),
-  );
+  return sortActiveThreadsByBranch(threads);
 }
 
 export interface ThreadListV2Item {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  groupActiveThreadsByBranch,
   planPinnedMove,
   resolveSettledThreadTimestamp,
+  sortActiveThreadsByBranch,
   sortPinnedThreadsByOrderKey,
   sortThreads,
   type ThreadSortInput,
@@ -151,6 +153,104 @@ describe("planPinnedMove", () => {
     expect(assignments).not.toBeNull();
     const keys = assignments!.map((entry) => entry.orderKey);
     expect([...keys].sort()).toEqual(keys);
+  });
+});
+
+describe("groupActiveThreadsByBranch", () => {
+  type BranchThread = {
+    readonly id: string;
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly branch: string | null;
+    readonly createdAt: string;
+    readonly unsettledAt?: string | null | undefined;
+  };
+
+  function makeBranchThread(overrides: Partial<BranchThread> = {}): BranchThread {
+    return {
+      id: "thread-1",
+      environmentId: "env-1",
+      projectId: "project-1",
+      branch: "main",
+      createdAt: "2026-03-09T10:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("keeps identical branch names independent across environments and projects", () => {
+    const groups = groupActiveThreadsByBranch([
+      makeBranchThread({
+        id: "a",
+        environmentId: "env-1",
+        projectId: "project-1",
+        branch: "feature",
+        createdAt: "2026-03-09T10:00:00.000Z",
+      }),
+      makeBranchThread({
+        id: "b",
+        environmentId: "env-1",
+        projectId: "project-2",
+        branch: "feature",
+        createdAt: "2026-03-09T10:01:00.000Z",
+      }),
+      makeBranchThread({
+        id: "c",
+        environmentId: "env-2",
+        projectId: "project-1",
+        branch: "feature",
+        createdAt: "2026-03-09T10:02:00.000Z",
+      }),
+    ]);
+
+    // Same branch name, but each environment/project pair is its own group.
+    expect(groups).toHaveLength(3);
+    for (const group of groups) {
+      expect(group.branch).toBe("feature");
+      expect(group.threads).toHaveLength(1);
+    }
+  });
+
+  it("merges threads sharing an environment, project, and branch into one group, newest first", () => {
+    const groups = groupActiveThreadsByBranch([
+      makeBranchThread({ id: "older", branch: "feature", createdAt: "2026-03-09T10:00:00.000Z" }),
+      makeBranchThread({ id: "newer", branch: "feature", createdAt: "2026-03-09T11:00:00.000Z" }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.threads.map((thread) => thread.id)).toEqual(["newer", "older"]);
+  });
+
+  it("keeps branchless threads independent instead of forming a shared group", () => {
+    const groups = groupActiveThreadsByBranch([
+      makeBranchThread({ id: "a", branch: null }),
+      makeBranchThread({ id: "b", branch: null }),
+    ]);
+
+    expect(groups).toHaveLength(2);
+    for (const group of groups) {
+      expect(group.branch).toBeNull();
+      expect(group.threads).toHaveLength(1);
+    }
+  });
+
+  it("orders groups by their newest thread and keeps grouped rows contiguous", () => {
+    const flattened = sortActiveThreadsByBranch([
+      makeBranchThread({
+        id: "feat-old",
+        branch: "feature",
+        createdAt: "2026-03-09T10:00:00.000Z",
+      }),
+      makeBranchThread({ id: "solo", branch: null, createdAt: "2026-03-09T10:30:00.000Z" }),
+      makeBranchThread({
+        id: "feat-new",
+        branch: "feature",
+        createdAt: "2026-03-09T11:00:00.000Z",
+      }),
+    ]);
+
+    // The feature group anchors to feat-new (newest), so both feature rows lead
+    // and stay contiguous ahead of the older branchless thread.
+    expect(flattened.map((thread) => thread.id)).toEqual(["feat-new", "feat-old", "solo"]);
   });
 });
 

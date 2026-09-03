@@ -258,26 +258,48 @@ describe("resolveThreadListV2SnoozeGateExpiryMs", () => {
 });
 
 describe("sortThreadsForListV2", () => {
+  const sortable = (input: { id: string; createdAt: string; unsettledAt?: string }) => ({
+    ...input,
+    environmentId: "env-1",
+    projectId: "project-1",
+    branch: null,
+  });
+
   it("orders by creation time, newest first, ignoring activity", () => {
     const sorted = sortThreadsForListV2([
-      { id: "oldest", createdAt: "2026-06-01T08:00:00.000Z" },
-      { id: "newest", createdAt: "2026-06-01T12:00:00.000Z" },
-      { id: "middle", createdAt: "2026-06-01T10:00:00.000Z" },
+      sortable({ id: "oldest", createdAt: "2026-06-01T08:00:00.000Z" }),
+      sortable({ id: "newest", createdAt: "2026-06-01T12:00:00.000Z" }),
+      sortable({ id: "middle", createdAt: "2026-06-01T10:00:00.000Z" }),
     ]);
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "middle", "oldest"]);
   });
 
   it("surfaces an un-settled thread at the top via its re-entry stamp", () => {
     const sorted = sortThreadsForListV2([
-      {
+      sortable({
         id: "old-unsettled",
         createdAt: "2026-06-01T08:00:00.000Z",
         unsettledAt: "2026-06-01T13:00:00.000Z",
-      },
-      { id: "newest", createdAt: "2026-06-01T12:00:00.000Z" },
-      { id: "middle", createdAt: "2026-06-01T10:00:00.000Z" },
+      }),
+      sortable({ id: "newest", createdAt: "2026-06-01T12:00:00.000Z" }),
+      sortable({ id: "middle", createdAt: "2026-06-01T10:00:00.000Z" }),
     ]);
     expect(sorted.map((thread) => thread.id)).toEqual(["old-unsettled", "newest", "middle"]);
+  });
+
+  it("keeps threads on the same branch together", () => {
+    const sorted = sortThreadsForListV2([
+      {
+        ...sortable({ id: "feature-old", createdAt: "2026-06-01T08:00:00.000Z" }),
+        branch: "feature",
+      },
+      { ...sortable({ id: "other", createdAt: "2026-06-01T11:00:00.000Z" }), branch: "other" },
+      {
+        ...sortable({ id: "feature-new", createdAt: "2026-06-01T12:00:00.000Z" }),
+        branch: "feature",
+      },
+    ]);
+    expect(sorted.map((thread) => thread.id)).toEqual(["feature-new", "feature-old", "other"]);
   });
 });
 
