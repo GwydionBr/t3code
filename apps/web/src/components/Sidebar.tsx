@@ -214,6 +214,8 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
+const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
+const expandedBranchGroupsSchema = Schema.Array(Schema.String);
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -728,6 +730,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
   variant: "card" | "slim";
+  treeChild?: boolean;
   // Slim rows are either settled (action: un-settle) or merely quiet
   // (seen Ready threads — action: settle).
   variantAction: "settle" | "unsettle" | "unsnooze";
@@ -1435,6 +1438,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       {...(sortable?.listeners ?? {})}
       className={cn(
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_96px]",
+        props.treeChild && "relative ml-3 border-l border-sidebar-border/70 pl-2",
         sortable?.isDragging && "z-20 opacity-80",
       )}
     >
@@ -2301,6 +2305,25 @@ export default function Sidebar() {
     false,
     Schema.Boolean,
   );
+  const [expandedBranchGroups, setExpandedBranchGroups] = useLocalStorage(
+    EXPANDED_BRANCH_GROUPS_KEY,
+    [] as string[],
+    expandedBranchGroupsSchema,
+  );
+  const expandedBranchGroupKeys = useMemo(
+    () => new Set(expandedBranchGroups),
+    [expandedBranchGroups],
+  );
+  const toggleBranchGroup = useCallback(
+    (groupKey: string) => {
+      setExpandedBranchGroups((current) =>
+        current.includes(groupKey)
+          ? current.filter((candidate) => candidate !== groupKey)
+          : [...current, groupKey],
+      );
+    },
+    [setExpandedBranchGroups],
+  );
   const toggleSettledShelf = useCallback(
     () => setSettledShelfExpanded((value) => !value),
     [setSettledShelfExpanded],
@@ -2341,9 +2364,45 @@ export default function Sidebar() {
     return routeThread === undefined ? [] : [routeThread];
   }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
 
+  const renderedActiveThreads = useMemo(() => {
+    const visible: EnvironmentThreadShell[] = [];
+    for (const [index, thread] of activeThreads.entries()) {
+      const previous = activeThreads[index - 1];
+      const groupKey = `branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`;
+      const isFirstInGroup =
+        previous?.branch !== thread.branch ||
+        previous.environmentId !== thread.environmentId ||
+        previous.projectId !== thread.projectId;
+      const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+      if (
+        thread.branch === null ||
+        isFirstInGroup ||
+        expandedBranchGroupKeys.has(groupKey) ||
+        threadKey === routeThreadKey
+      ) {
+        visible.push(thread);
+      }
+    }
+    return visible;
+  }, [activeThreads, expandedBranchGroupKeys, routeThreadKey]);
+  const renderedActiveThreadKeys = useMemo(
+    () =>
+      new Set(
+        renderedActiveThreads.map((thread) =>
+          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        ),
+      ),
+    [renderedActiveThreads],
+  );
+
   const orderedThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
-    [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
+    () => [
+      ...pinnedThreads,
+      ...renderedActiveThreads,
+      ...visibleSnoozedThreads,
+      ...renderedSettledThreads,
+    ],
+    [pinnedThreads, renderedActiveThreads, visibleSnoozedThreads, renderedSettledThreads],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -3824,6 +3883,7 @@ export default function Sidebar() {
                     thread: EnvironmentThreadShell,
                     section: "pinned" | "active" | "snoozed" | "settled",
                     sortable?: SortablePinnedRowBag,
+                    treeChild = false,
                   ) => {
                     const threadKey = scopedThreadKey(
                       scopeThreadRef(thread.environmentId, thread.id),
@@ -3845,6 +3905,7 @@ export default function Sidebar() {
                         key={`${threadKey}:${rowVariant}`}
                         thread={thread}
                         variant={rowVariant}
+                        treeChild={treeChild}
                         // Snoozed rows wake, settled rows un-settle, and cards settle.
                         variantAction={
                           section === "snoozed"
@@ -4015,21 +4076,46 @@ export default function Sidebar() {
                       (previous?.branch !== thread.branch ||
                         previous.environmentId !== thread.environmentId ||
                         previous.projectId !== thread.projectId);
+                    const groupKey = `branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`;
+                    const groupExpanded = expandedBranchGroupKeys.has(groupKey);
                     if (startsGroup) {
+                      let groupSize = 1;
+                      while (
+                        activeThreads[index + groupSize]?.branch === thread.branch &&
+                        activeThreads[index + groupSize]?.environmentId === thread.environmentId &&
+                        activeThreads[index + groupSize]?.projectId === thread.projectId
+                      ) {
+                        groupSize += 1;
+                      }
                       items.push(
-                        <li
-                          key={`branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`}
-                          aria-label={`Threads on branch ${thread.branch}`}
-                          className="mt-2 flex list-none items-center gap-2 px-2.5"
-                        >
-                          <span className="min-w-0 truncate text-[11px] font-medium text-sidebar-muted-foreground/65">
-                            {thread.branch}
-                          </span>
-                          <span className="h-px flex-1 bg-sidebar-border/50" />
+                        <li key={groupKey} className="mt-2 list-none px-2.5">
+                          <button
+                            type="button"
+                            aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${thread.branch}`}
+                            aria-expanded={groupExpanded}
+                            onClick={() => toggleBranchGroup(groupKey)}
+                            className="flex w-full cursor-pointer items-center gap-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 hover:text-sidebar-foreground"
+                          >
+                            <ChevronDownIcon
+                              aria-hidden
+                              className={cn(
+                                "size-3 shrink-0 -rotate-90 transition-transform",
+                                groupExpanded && "rotate-0",
+                              )}
+                            />
+                            <span className="min-w-0 truncate">{thread.branch}</span>
+                            <span className="text-sidebar-muted-foreground/45">{groupSize}</span>
+                            <span className="h-px flex-1 bg-sidebar-border/60" />
+                          </button>
                         </li>,
                       );
                     }
-                    items.push(renderThreadRow(thread, "active"));
+                    const threadKey = scopedThreadKey(
+                      scopeThreadRef(thread.environmentId, thread.id),
+                    );
+                    if (renderedActiveThreadKeys.has(threadKey)) {
+                      items.push(renderThreadRow(thread, "active", undefined, sharesBranch));
+                    }
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the
                   // way, never gone. The header always renders while anything
