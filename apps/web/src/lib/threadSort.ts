@@ -1,8 +1,10 @@
 export {
   activeThreadAnchorTimestampMs,
+  groupActiveThreadsByBranch,
   getLatestThreadForProject,
   getThreadSortTimestamp,
   resolveSettledThreadTimestamp,
+  sortActiveThreadsByBranch,
   sortThreads,
   toSortableTimestamp,
   type SettledThreadTimestampInput,

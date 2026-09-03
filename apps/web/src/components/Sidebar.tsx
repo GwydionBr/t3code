@@ -3999,7 +3999,36 @@ export default function Sidebar() {
                       />,
                     );
                   }
-                  for (const thread of activeThreads) {
+                  for (const [index, thread] of activeThreads.entries()) {
+                    const previous = activeThreads[index - 1];
+                    const next = activeThreads[index + 1];
+                    const sharesBranch =
+                      thread.branch !== null &&
+                      ((previous?.branch === thread.branch &&
+                        previous.environmentId === thread.environmentId &&
+                        previous.projectId === thread.projectId) ||
+                        (next?.branch === thread.branch &&
+                          next.environmentId === thread.environmentId &&
+                          next.projectId === thread.projectId));
+                    const startsGroup =
+                      sharesBranch &&
+                      (previous?.branch !== thread.branch ||
+                        previous.environmentId !== thread.environmentId ||
+                        previous.projectId !== thread.projectId);
+                    if (startsGroup) {
+                      items.push(
+                        <li
+                          key={`branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`}
+                          aria-label={`Threads on branch ${thread.branch}`}
+                          className="mt-2 flex list-none items-center gap-2 px-2.5"
+                        >
+                          <span className="min-w-0 truncate text-[11px] font-medium text-sidebar-muted-foreground/65">
+                            {thread.branch}
+                          </span>
+                          <span className="h-px flex-1 bg-sidebar-border/50" />
+                        </li>,
+                      );
+                    }
                     items.push(renderThreadRow(thread, "active"));
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the

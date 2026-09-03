@@ -117,6 +117,58 @@ export function activeThreadAnchorTimestampMs(thread: {
   );
 }
 
+export interface ActiveThreadBranchGroup<T> {
+  readonly branch: string | null;
+  readonly threads: T[];
+}
+
+/** Keeps active threads from the same workspace branch together. Groups are
+    ordered by their newest thread; rows inside a group remain newest-first.
+    Branchless threads stay independent instead of forming a misleading
+    shared "no branch" group. */
+export function groupActiveThreadsByBranch<
+  T extends {
+    readonly id: string;
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly branch: string | null;
+    readonly createdAt: string;
+    readonly unsettledAt?: string | null | undefined;
+  },
+>(threads: readonly T[]): ActiveThreadBranchGroup<T>[] {
+  const ordered = [...threads].sort(
+    (left, right) =>
+      activeThreadAnchorTimestampMs(right) - activeThreadAnchorTimestampMs(left) ||
+      left.id.localeCompare(right.id),
+  );
+  const groups = new Map<string, ActiveThreadBranchGroup<T>>();
+
+  for (const thread of ordered) {
+    const key =
+      thread.branch === null
+        ? `thread:${thread.environmentId}:${thread.id}`
+        : `branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`;
+    const group = groups.get(key);
+    if (group) group.threads.push(thread);
+    else groups.set(key, { branch: thread.branch, threads: [thread] });
+  }
+
+  return [...groups.values()];
+}
+
+export function sortActiveThreadsByBranch<
+  T extends {
+    readonly id: string;
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly branch: string | null;
+    readonly createdAt: string;
+    readonly unsettledAt?: string | null | undefined;
+  },
+>(threads: readonly T[]): T[] {
+  return groupActiveThreadsByBranch(threads).flatMap((group) => group.threads);
+}
+
 export function sortThreads<T extends { readonly id: string } & ThreadSortInput>(
   threads: readonly T[],
   sortOrder: SidebarThreadSortOrder,

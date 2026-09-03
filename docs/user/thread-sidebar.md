@@ -10,6 +10,10 @@ confirmation applies to the sidebar controls, thread menus, and the `mod+shift+p
 Pinned threads still move to **Settled** when they become inactive. They also move when their pull
 request merges if **Auto-settle merged threads** is enabled.
 
+Active threads on the same branch stay next to each other. Branch groups follow the newest thread
+in each group, while threads without a branch keep their normal position. Pinned threads keep the
+order you chose instead of being regrouped.
+
 Each server stores its own copy of the automatic settlement settings and checks them even when no
 web, desktop, or mobile client is connected. By default, it settles threads after three days without
 activity and when their pull request merges. An eligible idle thread also settles when its pull
