@@ -176,6 +176,15 @@ export type ThreadFeedLatestTurn = Pick<
   "turnId" | "state" | "startedAt" | "completedAt"
 >;
 
+export function isContextCompactionActivityGroup(
+  entry: Extract<ThreadFeedEntry, { readonly type: "activity-group" }>,
+): boolean {
+  return (
+    entry.activities.length === 1 &&
+    entry.activities[0]?.workEntry.sourceActivityKind === "context-compaction"
+  );
+}
+
 function requestKindFromRequestType(requestType: unknown): PendingApproval["requestKind"] | null {
   switch (requestType) {
     case "command_execution_approval":
@@ -440,6 +449,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   const taskDetailAsLabel =
     isTaskActivity &&
     !taskSummary &&
+    !title &&
     typeof payload?.detail === "string" &&
     payload.detail.length > 0
       ? payload.detail
@@ -490,7 +500,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
         toolName: data?.toolName,
         data,
       });
-    if (detail && !repeatsCommand) entry.detail = detail;
+    if (detail && detail !== title && !repeatsCommand) entry.detail = detail;
   }
   if (isTaskActivity && typeof payload?.error === "string" && payload.error.trim()) {
     entry.detail = payload.error;
@@ -992,6 +1002,11 @@ function unwrapCommandRemainder(value: string, wrapperFlagPattern: RegExp): stri
     return null;
   }
 
+  const openingQuote = command[0];
+  if ((openingQuote === "'" || openingQuote === '"') && !command.endsWith(openingQuote)) {
+    return null;
+  }
+
   const unwrapped = trimMatchingOuterQuotes(command);
   return unwrapped.length > 0 ? unwrapped : null;
 }
@@ -1096,6 +1111,9 @@ function extractWorkLogToolLifecycleStatus(
   payload: Record<string, unknown> | null,
 ): WorkLogToolLifecycleStatus | undefined {
   const status = payload?.status;
+  // The parent turn ended, so batch tracking is inactive. The detail explains
+  // that child status is unavailable; do not retain the earlier running marker.
+  if (status === "idle" && payload?.taskType === "subagent_batch") return "stopped";
   if (status === "pending" || status === "running" || status === "waiting") return "inProgress";
   if (status === "cancelled" || status === "interrupted") return "stopped";
   if (
@@ -1266,6 +1284,18 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
       continue;
     }
 
+    if (entry.activity.workEntry.sourceActivityKind === "context-compaction") {
+      grouped.push({
+        type: "activity-group",
+        id: entry.id,
+        createdAt: entry.createdAt,
+        turnId: entry.turnId,
+        activities: [entry.activity],
+      });
+      openGroupActivities = null;
+      continue;
+    }
+
     if (openGroupActivities !== null && openGroupTurnId === entry.turnId) {
       openGroupActivities.push(entry.activity);
       continue;
@@ -1390,6 +1420,16 @@ function deriveThreadFeedTurnFolds(
     if (hiddenEntryIds.size === 0) {
       continue;
     }
+    // A lone compaction row stays visible on its own; it only folds away as
+    // part of a turn that already folds other work.
+    const hidesNonCompactionWork = entries.some(
+      (entry) =>
+        hiddenEntryIds.has(entry.id) &&
+        !(entry.type === "activity-group" && isContextCompactionActivityGroup(entry)),
+    );
+    if (!hidesNonCompactionWork) {
+      continue;
+    }
 
     const firstEntry = entries[0];
     const firstHiddenEntry = entries.find((entry) => hiddenEntryIds.has(entry.id));
@@ -1501,6 +1541,10 @@ function appendPresentedFeedEntry(
   activeTail: boolean,
 ): void {
   if (entry.type !== "activity-group") {
+    result.push(entry);
+    return;
+  }
+  if (isContextCompactionActivityGroup(entry)) {
     result.push(entry);
     return;
   }
@@ -1710,10 +1754,16 @@ export function derivePendingApprovals(
       ? payload.options.filter(isProviderApprovalOption)
       : undefined;
 
-    if (activity.kind === "approval.requested" && requestId && requestKind) {
+    if (
+      activity.kind === "approval.requested" &&
+      requestId &&
+      payload?.requestType !== "tool_user_input" &&
+      payload?.requestType !== "auth_tokens_refresh"
+    ) {
       openByRequestId.set(requestId, {
         requestId,
-        requestKind,
+        // Older OpenCode requests can have no recognized approval kind.
+        requestKind: requestKind ?? "command",
         createdAt: activity.createdAt,
         ...(detail ? { detail } : {}),
         ...(appName ? { appName } : {}),

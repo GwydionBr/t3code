@@ -587,26 +587,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [messages, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
-        projectionThreadMessageRepository.listByThreadId({ threadId }),
-        projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
-        projectionThreadActivityRepository.listUserInputLifecycleByThreadId({ threadId }),
-        projectionPendingApprovalRepository.listByThreadId({ threadId }),
-      ]);
+      const [latestUserMessageAt, proposedPlans, activities, pendingApprovalCount] =
+        yield* Effect.all([
+          projectionThreadMessageRepository.getLatestUserMessageAt({ threadId }),
+          projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
+          projectionThreadActivityRepository.listUserInputLifecycleByThreadId({ threadId }),
+          projectionPendingApprovalRepository.countPendingByThreadId({ threadId }),
+        ]);
 
-      let latestUserMessageAt: string | null = null;
-      for (const message of messages) {
-        if (
-          message.role === "user" &&
-          (latestUserMessageAt === null || message.createdAt > latestUserMessageAt)
-        ) {
-          latestUserMessageAt = message.createdAt;
-        }
-      }
-
-      const pendingApprovalCount = pendingApprovals.filter(
-        (approval) => approval.status === "pending",
-      ).length;
       const pendingUserInputCount = derivePendingUserInputCountFromActivities(activities);
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
         latestTurnId: existingRow.value.latestTurnId,
@@ -1269,6 +1257,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
 
         case "thread.turn-start-requested": {
+          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isSome(pendingTurnStart)) {
+            const pendingMessage = yield* projectionThreadMessageRepository.getByMessageId({
+              messageId: pendingTurnStart.value.messageId,
+            });
+            if (
+              Option.isSome(pendingMessage) &&
+              pendingMessage.value.role === "user" &&
+              (pendingMessage.value.attachments?.length ?? 0) === 0 &&
+              pendingMessage.value.text.trim().toLowerCase() === "/compact"
+            ) {
+              return;
+            }
+          }
           yield* projectionTurnRepository.replacePendingTurnStart({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,
@@ -1279,10 +1283,42 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "thread.activity-appended": {
+          if (event.payload.activity.kind === "context-compaction") {
+            const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId(
+              event.payload,
+            );
+            if (
+              Option.isNone(pendingTurnStart) ||
+              String(pendingTurnStart.value.messageId) !==
+                extractActivityRequestId(event.payload.activity.payload)
+            ) {
+              return;
+            }
+            yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
+            return;
+          }
+          if (event.payload.activity.kind !== "provider.turn.start.failed") return;
+          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId(
+            event.payload,
+          );
+          if (
+            Option.isNone(pendingTurnStart) ||
+            String(pendingTurnStart.value.messageId) !==
+              extractActivityRequestId(event.payload.activity.payload)
+          ) {
+            return;
+          }
+          yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
+          return;
+        }
+
         case "thread.session-set": {
           const turnId = event.payload.session.activeTurnId;
           if (turnId === null || event.payload.session.status !== "running") {
             if (
+              (event.payload.session.status === "ready" &&
+                event.commandId?.startsWith("server:provider-session-set:") === true) ||
               event.payload.session.status === "error" ||
               event.payload.session.status === "stopped" ||
               event.payload.session.status === "interrupted"
@@ -1679,6 +1715,44 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 resolvedAt: event.payload.activity.createdAt,
               });
               return;
+            }
+            if (Option.isNone(existingRow) || existingRow.value.status !== "resolved") {
+              return;
+            }
+
+            // Sending a reply clears the badge before the provider accepts it.
+            // A failed reply must restore the request unless a terminal event
+            // already closed it, including a reply from another client.
+            const requestActivities = (yield* projectionThreadActivityRepository.listByThreadId({
+              threadId: existingRow.value.threadId,
+            })).filter((activity) => extractActivityRequestId(activity.payload) === requestId);
+            const wasRequested = requestActivities.some(
+              (activity) => activity.kind === "approval.requested",
+            );
+            const wasResolved = requestActivities.some((activity) => {
+              if (activity.kind === "approval.resolved") {
+                return true;
+              }
+              if (activity.kind !== "provider.approval.respond.failed") {
+                return false;
+              }
+              const activityPayload =
+                typeof activity.payload === "object" && activity.payload !== null
+                  ? (activity.payload as Record<string, unknown>)
+                  : null;
+              return isStalePendingApprovalFailureDetail(
+                typeof activityPayload?.detail === "string"
+                  ? activityPayload.detail.toLowerCase()
+                  : null,
+              );
+            });
+            if (wasRequested && !wasResolved) {
+              yield* projectionPendingApprovalRepository.upsert({
+                ...existingRow.value,
+                status: "pending",
+                decision: null,
+                resolvedAt: null,
+              });
             }
             return;
           }

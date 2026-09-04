@@ -385,6 +385,12 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settingSources, ["user", "project", "local"]);
+      assert.deepEqual(createInput?.options.systemPrompt, {
+        type: "preset",
+        preset: "claude_code",
+        append:
+          "<runtime_info>In case you're asked: you are running in T3 Code through the Claude Code harness. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>",
+      });
       assert.equal(createInput?.options.permissionMode, "bypassPermissions");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, true);
     }).pipe(
@@ -2084,6 +2090,177 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("fails a turn when the result carries a give-up terminal_reason", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      // The CLI stamps subtype success with an empty error list when it
+      // gives up after exhausting API retries; the terminal_reason is the
+      // only structured failure signal.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "",
+        errors: [],
+        stop_reason: null,
+        terminal_reason: "api_error",
+        session_id: "sdk-session-api-error",
+        uuid: "result-api-error",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.deepEqual(
+        runtimeEvents.map((event) => event.type),
+        [
+          "session.started",
+          "session.configured",
+          "session.state.changed",
+          "turn.started",
+          "thread.started",
+          "runtime.error",
+          "turn.completed",
+        ],
+      );
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.equal(
+          turnCompleted.payload.errorMessage,
+          "Claude gave up after repeated API errors.",
+        );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails a turn for every dead-turn terminal_reason", () => {
+    const reasons = [
+      "blocking_limit",
+      "rapid_refill_breaker",
+      "prompt_too_long",
+      "image_error",
+      "model_error",
+      "malformed_tool_use_exhausted",
+      "budget_exhausted",
+      "structured_output_retry_exhausted",
+      "tool_deferred_unavailable",
+      "turn_setup_failed",
+    ];
+    // One harness per reason: the fake query settles a single turn.
+    const runDeadTurn = (reason: string) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const completionFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "",
+          errors: [],
+          stop_reason: null,
+          terminal_reason: reason,
+          session_id: "sdk-session-dead-turn",
+          uuid: `result-${reason}`,
+        } as unknown as SDKMessage);
+        const completed = yield* Fiber.join(completionFiber);
+        assert.equal(completed._tag, "Some");
+        if (completed._tag === "Some" && completed.value.type === "turn.completed") {
+          assert.equal(completed.value.payload.state, "failed", reason);
+          assert.ok(completed.value.payload.errorMessage, `${reason} carries an error message`);
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    };
+    return Effect.forEach(reasons, runDeadTurn, { discard: true });
+  });
+
+  it.effect("fails a turn when a success result reports a 529 overload", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 529,
+        result: "",
+        errors: [],
+        stop_reason: null,
+        session_id: "sdk-session-overload",
+        uuid: "result-overload",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.equal(
+          turnCompleted.payload.errorMessage,
+          "Claude API is overloaded (529). Try again shortly.",
+        );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("interruptTurn settles live tasks and closes the provider session", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2370,7 +2547,7 @@ describe("ClaudeAdapterLive", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
-      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 9).pipe(
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 11).pipe(
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -2411,6 +2588,13 @@ describe("ClaudeAdapterLive", () => {
         uuid: "compact-boundary-usage",
       } as unknown as SDKMessage);
       harness.query.emit({
+        type: "system",
+        subtype: "compact_boundary",
+        compact_metadata: { post_tokens: 40 },
+        session_id: "sdk-session-compacted-usage",
+        uuid: "compact-boundary-post-usage",
+      } as unknown as SDKMessage);
+      harness.query.emit({
         type: "result",
         subtype: "success",
         is_error: false,
@@ -2433,6 +2617,14 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
 
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const compactionEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "thread.state.changed" }> =>
+          event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      assert.equal(compactionEvents[0]?.payload.beforeTokens, 200);
+      assert.equal(compactionEvents[0]?.payload.afterTokens, 40);
+      assert.equal(compactionEvents[1]?.payload.beforeTokens, undefined);
+      assert.equal(compactionEvents[1]?.payload.afterTokens, 40);
       const finalUsageEvent = runtimeEvents.findLast(
         (event) => event.type === "thread.token-usage.updated",
       );
@@ -2440,7 +2632,6 @@ describe("ClaudeAdapterLive", () => {
       if (finalUsageEvent?.type === "thread.token-usage.updated") {
         assert.deepEqual(finalUsageEvent.payload.usage, {
           usedTokens: 40,
-          lastUsedTokens: 200,
           totalProcessedTokens: 450,
           maxTokens: 200000,
         });
@@ -3068,7 +3259,36 @@ describe("ClaudeAdapterLive", () => {
         { type: "system", subtype: "plugin_install", session_id: "session", uuid: "pi" },
         { type: "system", subtype: "memory_recall", session_id: "session", uuid: "mr" },
         { type: "system", subtype: "elicitation_complete", session_id: "session", uuid: "ec" },
+        {
+          type: "system",
+          subtype: "control_request_progress",
+          request_id: "ctrl-1",
+          status: "started",
+          session_id: "session",
+          uuid: "crp",
+        },
+        {
+          type: "system",
+          subtype: "worker_shutting_down",
+          reason: "host_exit",
+          session_id: "session",
+          uuid: "wsd",
+        },
+        {
+          type: "system",
+          subtype: "informational",
+          content: "Loaded 3 skills",
+          level: "notice",
+          session_id: "session",
+          uuid: "info",
+        },
         { type: "prompt_suggestion", suggestion: "try this", session_id: "session", uuid: "ps" },
+        {
+          type: "conversation_reset",
+          new_conversation_id: "conv-2",
+          session_id: "session",
+          uuid: "cr",
+        },
         {
           type: "system",
           subtype: "notification",
@@ -3090,6 +3310,27 @@ describe("ClaudeAdapterLive", () => {
         priority: "high",
         session_id: "session",
         uuid: "notif-high",
+      } as unknown as SDKMessage);
+      // Warning-level informational notes and refusals without a fallback
+      // model surface as warning rows too.
+      harness.query.emit({
+        type: "system",
+        subtype: "informational",
+        content: "Stop hook prevented continuation",
+        level: "warning",
+        prevent_continuation: true,
+        session_id: "session",
+        uuid: "info-warn",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "model_refusal_no_fallback",
+        original_model: "claude-opus-5",
+        request_id: null,
+        api_refusal_explanation: "The request was declined by the API.",
+        content: "Model refused",
+        session_id: "session",
+        uuid: "mrnf",
       } as unknown as SDKMessage);
       // session_state_changed maps to the matching session states.
       for (const [state, uuid] of [
@@ -3121,10 +3362,15 @@ describe("ClaudeAdapterLive", () => {
       yield* Effect.yieldNow;
 
       const warnings = runtimeEvents.filter((event) => event.type === "runtime.warning");
-      // Exactly one warning: the high-priority notification. Nothing else.
+      // Exactly three warnings: the high-priority notification, the
+      // warning-level informational note, and the refusal. Nothing else.
       assert.deepEqual(
         warnings.map((event) => event.payload.message),
-        ["context window nearly full"],
+        [
+          "context window nearly full",
+          "Stop hook prevented continuation",
+          "The request was declined by the API.",
+        ],
       );
       const sessionStates = runtimeEvents
         .filter((event) => event.type === "session.state.changed")
@@ -4170,6 +4416,7 @@ describe("ClaudeAdapterLive", () => {
         { command: "pwd" },
         {
           signal: new AbortController().signal,
+          requestId: "request-1",
           suggestions: [
             {
               type: "setMode",
@@ -4281,6 +4528,7 @@ describe("ClaudeAdapterLive", () => {
         { title: "hello" },
         {
           signal: new AbortController().signal,
+          requestId: "request-2",
           suggestions: [],
           toolUseID: "tool-use-mcp-1",
         },
@@ -4307,6 +4555,7 @@ describe("ClaudeAdapterLive", () => {
         { command: "git status" },
         {
           signal: new AbortController().signal,
+          requestId: "request-3",
           suggestions: [
             {
               type: "addRules",
@@ -4365,6 +4614,7 @@ describe("ClaudeAdapterLive", () => {
         {},
         {
           signal: new AbortController().signal,
+          requestId: "request-4",
           toolUseID: "tool-agent-1",
         },
       );
@@ -4389,6 +4639,7 @@ describe("ClaudeAdapterLive", () => {
         { pattern: "foo", path: "src" },
         {
           signal: new AbortController().signal,
+          requestId: "request-5",
           toolUseID: "tool-grep-approval-1",
         },
       );
@@ -4931,6 +5182,7 @@ describe("ClaudeAdapterLive", () => {
         },
         {
           signal: new AbortController().signal,
+          requestId: "request-6",
           toolUseID: "tool-exit-1",
         },
       );
@@ -5053,7 +5305,7 @@ describe("ClaudeAdapterLive", () => {
           dialogKind: "resume_return",
           payload: { sessionAgeMinutes: 145, estimatedTokens: 275123 },
         },
-        { signal: new AbortController().signal },
+        { signal: new AbortController().signal, requestId: "request-dialog" },
       );
 
       const requested = yield* Stream.runHead(adapter.streamEvents);
@@ -5153,6 +5405,7 @@ describe("ClaudeAdapterLive", () => {
 
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
+        requestId: "request-7",
         toolUseID: "tool-ask-1",
       });
 
@@ -5279,6 +5532,7 @@ describe("ClaudeAdapterLive", () => {
 
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
+        requestId: "request-8",
         toolUseID: "tool-ask-2",
       });
 
@@ -5344,6 +5598,7 @@ describe("ClaudeAdapterLive", () => {
         },
         {
           signal: controller.signal,
+          requestId: "request-9",
           toolUseID: "tool-ask-abort",
         },
       );
@@ -5419,6 +5674,7 @@ describe("ClaudeAdapterLive", () => {
         },
         {
           signal: controller.signal,
+          requestId: "request-10",
           toolUseID: "tool-ask-pre-aborted",
         },
       );
@@ -5475,7 +5731,11 @@ describe("ClaudeAdapterLive", () => {
             },
           ],
         },
-        { signal: new AbortController().signal, toolUseID: "tool-ask-stop" },
+        {
+          signal: new AbortController().signal,
+          requestId: "request-stop",
+          toolUseID: "tool-ask-stop",
+        },
       );
 
       const requestedEvent = yield* Stream.runHead(adapter.streamEvents);

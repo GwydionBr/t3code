@@ -141,14 +141,17 @@ follow-up message or start a new thread instead.
 
 ### Subagents
 
-Antigravity subagent calls appear in **Agents** on web and desktop, and in the work log on
-mobile. Each call shows its status and the result or error returned by Antigravity. Calls
-that run at the same time have separate entries.
+Subagent launches appear as **Antigravity subagent batch** in **Agents** on web and desktop,
+and in the work log on mobile. One launch can start several agents. The batch stays active
+after launch while the parent turn runs. When that turn ends, the entry becomes idle and
+states that individual agent status is unavailable. Launch errors remain visible.
+The conversation summary counts launches as batches and shows idle or stopped batches
+without a completion checkmark.
 
-The official ACP agent does not report subagent names, models, token usage, or parent links.
-Entries use the name **Antigravity subagent**. Child tool calls cannot be assigned to an entry
-because ACP does not include their owning subagent. These entries track each invocation,
-not a separate thread you can open or control.
+The official ACP agent does not send individual child status, names, models, token usage,
+or reply ownership. T3 Code cannot show separate child entries or separate child replies
+from the parent conversation. The launch description is not a child result. Batch entries
+cannot be opened or controlled as separate threads.
 
 ## Accounts and removal
 
@@ -176,10 +179,14 @@ paid-plan tier or remaining subscription quota. See Google's [Antigravity plans]
 [personal Google sign-in guide][google-setup].
 
 After an environment restarts, Google sign-in can show as not checked until an authenticated
-session succeeds. To check account access and reload models, use **Refresh provider status**
-in web or desktop provider settings, or **Refresh models** in the mobile model picker. Refresh
-uses saved Google sign-in and does not open a login page. If sign-in is required, use the
-provider's setup controls. Automatic status checks verify the installation only.
+session succeeds. You can continue an existing thread. Antigravity checks saved Google sign-in
+when the session starts. An unchecked status does not require signing in again.
+
+To check account access and reload models on web or desktop, open **Settings** > **Providers**
+and select the circular arrow beside **Checked** at the top of the page. Its tooltip says
+**Refresh provider status**. On mobile, use **Refresh models** in the model picker.
+Refresh uses saved Google sign-in and does not open a login page. If sign-in is required,
+use the provider's setup controls. Automatic status checks verify the installation only.
 
 The packaged runtime can be slow to start, especially on Windows. Health checks, model refresh,
 and sign-out each allow up to 90 seconds before reporting a timeout.
