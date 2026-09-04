@@ -551,6 +551,36 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   return "ready";
 }
 
+export type SidebarBranchStatus = "approval" | "input" | "failed" | "active";
+
+export interface SidebarBranchStatusCount {
+  readonly status: SidebarBranchStatus;
+  readonly count: number;
+}
+
+/** Summarizes the live states a collapsed branch would otherwise hide.
+    Working and monitoring share one calm active-work indicator at group level. */
+export function resolveSidebarBranchStatusSummary(
+  threads: ReadonlyArray<SidebarThreadStatusInput>,
+): SidebarBranchStatusCount[] {
+  const counts: Record<SidebarBranchStatus, number> = {
+    approval: 0,
+    input: 0,
+    failed: 0,
+    active: 0,
+  };
+
+  for (const thread of threads) {
+    const status = resolveSidebarThreadStatus(thread);
+    if (status === "working" || status === "monitoring") counts.active += 1;
+    else if (status !== "ready") counts[status] += 1;
+  }
+
+  return (["approval", "input", "failed", "active"] as const).flatMap((status) =>
+    counts[status] === 0 ? [] : [{ status, count: counts[status] }],
+  );
+}
+
 /** NaN-safe Date.parse for sort comparators: a malformed timestamp must not
     poison the whole ordering, so it sinks to the epoch instead. */
 export function parseTimestampMs(isoDate: string): number {
