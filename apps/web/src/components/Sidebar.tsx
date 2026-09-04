@@ -245,31 +245,20 @@ function SidebarBranchStatusSummary({
   readonly summary: ReadonlyArray<SidebarBranchStatusCount>;
 }) {
   if (summary.length === 0) return null;
-  const label = branchStatusSummaryLabel(summary);
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
+    <span
+      aria-hidden
+      className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+    >
+      {summary.map(({ status, count }) => (
+        <span key={status} className="inline-flex items-center gap-1">
           <span
-            aria-hidden
-            className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+            className={cn("size-1.5 rounded-full", BRANCH_STATUS_PRESENTATION[status].dotClassName)}
           />
-        }
-      >
-        {summary.map(({ status, count }) => (
-          <span key={status} className="inline-flex items-center gap-1">
-            <span
-              className={cn(
-                "size-1.5 rounded-full",
-                BRANCH_STATUS_PRESENTATION[status].dotClassName,
-              )}
-            />
-            {count}
-          </span>
-        ))}
-      </TooltipTrigger>
-      <TooltipPopup side="top">{label}</TooltipPopup>
-    </Tooltip>
+          {count}
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -1494,7 +1483,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       {...(sortable?.listeners ?? {})}
       className={cn(
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_96px]",
-        props.treeChild && "relative ml-3 border-l border-sidebar-border/70 pl-2",
+        props.treeChild &&
+          "relative ml-2.5 pl-2.5 before:absolute before:-inset-y-px before:left-0 before:w-px before:bg-sidebar-border/60",
         sortable?.isDragging && "z-20 opacity-80",
       )}
     >
@@ -4147,27 +4137,56 @@ export default function Sidebar() {
                         activeThreads.slice(index, index + groupSize),
                       );
                       const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
+                      const projectLabel =
+                        projectDisplayNameByKey.get(
+                          `${thread.environmentId}:${thread.projectId}`,
+                        ) ?? null;
+                      const branchLabel = thread.branch ?? "Unknown branch";
+                      const branchContextLabel = projectLabel
+                        ? `${projectLabel} · ${branchLabel}`
+                        : branchLabel;
                       items.push(
-                        <li key={groupKey} className="mt-2 list-none px-2.5">
-                          <button
-                            type="button"
-                            aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${thread.branch}${statusSummaryLabel ? `. ${statusSummaryLabel}` : ""}`}
-                            aria-expanded={groupExpanded}
-                            onClick={() => toggleBranchGroup(groupKey)}
-                            className="flex w-full cursor-pointer items-center gap-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 hover:text-sidebar-foreground"
-                          >
-                            <ChevronDownIcon
-                              aria-hidden
-                              className={cn(
-                                "size-3 shrink-0 -rotate-90 transition-transform",
-                                groupExpanded && "rotate-0",
-                              )}
-                            />
-                            <span className="min-w-0 truncate">{thread.branch}</span>
-                            <span className="text-sidebar-muted-foreground/45">{groupSize}</span>
-                            <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
-                            <SidebarBranchStatusSummary summary={statusSummary} />
-                          </button>
+                        <li key={groupKey} className="mt-1.5 list-none px-1.5">
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <button
+                                  type="button"
+                                  aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${statusSummaryLabel ? `. ${statusSummaryLabel}` : ""}`}
+                                  aria-expanded={groupExpanded}
+                                  onClick={() => toggleBranchGroup(groupKey)}
+                                  className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+                                />
+                              }
+                            >
+                              <ChevronDownIcon
+                                aria-hidden
+                                className={cn(
+                                  "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-150",
+                                  groupExpanded && "rotate-0",
+                                )}
+                              />
+                              <GitBranchIcon
+                                aria-hidden
+                                className="size-3.5 shrink-0 text-sidebar-muted-foreground/55"
+                              />
+                              <span className="min-w-0 truncate">{branchLabel}</span>
+                              <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/70">
+                                {groupSize}
+                              </span>
+                              <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
+                              <SidebarBranchStatusSummary summary={statusSummary} />
+                            </TooltipTrigger>
+                            <TooltipPopup side="top">
+                              <span className="font-medium">{branchContextLabel}</span>
+                              {statusSummaryLabel ? (
+                                <span className="text-muted-foreground">
+                                  {" "}
+                                  · {statusSummaryLabel}
+                                </span>
+                              ) : null}
+                            </TooltipPopup>
+                          </Tooltip>
                         </li>,
                       );
                     }
