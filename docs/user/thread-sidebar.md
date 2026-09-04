@@ -15,7 +15,8 @@ in each group, while threads without a branch keep their normal position. Pinned
 order you chose instead of being regrouped. A collapsed branch keeps its newest thread visible;
 select the branch heading to show or hide the remaining threads. Colored counters in the branch
 heading summarize threads awaiting approval or input, failed threads, and active work across the
-whole group, including rows hidden while the branch is collapsed.
+whole group, including rows hidden while the branch is collapsed. A teal terminal count shows how
+many threads in the group currently have a terminal process running.
 
 Each server stores its own copy of the automatic settlement settings and checks them even when no
 web, desktop, or mobile client is connected. By default, it settles threads after three days without

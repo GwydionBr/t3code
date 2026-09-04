@@ -140,6 +140,7 @@ import {
   planPinnedReorder,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
+  countThreadsWithRunningTerminals,
   resolveSidebarBranchStatusSummary,
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
@@ -184,7 +185,7 @@ import {
   shouldShowInstanceBadge,
   type ProviderInstanceEntry,
 } from "../providerInstances";
-import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Button } from "./ui/button";
 import { Collapsible, CollapsiblePanel } from "./ui/collapsible";
@@ -241,6 +242,11 @@ function branchStatusSummaryLabel(summary: ReadonlyArray<SidebarBranchStatusCoun
     .join(", ");
 }
 
+function branchTerminalSummaryLabel(count: number): string | null {
+  if (count === 0) return null;
+  return `${count} thread${count === 1 ? "" : "s"} with a terminal process running`;
+}
+
 function SidebarBranchStatusSummary({
   summary,
 }: {
@@ -250,7 +256,7 @@ function SidebarBranchStatusSummary({
   return (
     <span
       aria-hidden
-      className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+      className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
     >
       {summary.map(({ status, count }) => (
         <span key={status} className="inline-flex items-center gap-1">
@@ -261,6 +267,97 @@ function SidebarBranchStatusSummary({
         </span>
       ))}
     </span>
+  );
+}
+
+function SidebarBranchTerminalSummary({ count }: { readonly count: number }) {
+  if (count === 0) return null;
+  return (
+    <span
+      aria-hidden
+      data-testid="sidebar-branch-terminal-summary"
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-teal-600 dark:text-teal-300/90"
+    >
+      <TerminalIcon className="size-3" />
+      {count}
+    </span>
+  );
+}
+
+function SidebarBranchGroupHeader({
+  groupKey,
+  groupThreads,
+  groupExpanded,
+  branchLabel,
+  projectLabel,
+  branchContextLabel,
+  onToggleExpanded,
+}: {
+  readonly groupKey: string;
+  readonly groupThreads: ReadonlyArray<SidebarThreadSummary>;
+  readonly groupExpanded: boolean;
+  readonly branchLabel: string;
+  readonly projectLabel: string | null;
+  readonly branchContextLabel: string;
+  readonly onToggleExpanded: (groupKey: string, expanded: boolean) => void;
+}) {
+  const statusSummary = resolveSidebarBranchStatusSummary(groupThreads);
+  const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
+  const sessions = useKnownTerminalSessions({
+    environmentId: groupThreads[0]?.environmentId ?? null,
+    threadId: null,
+  });
+  const terminalThreadCount = countThreadsWithRunningTerminals(groupThreads, sessions);
+  const terminalSummaryLabel = branchTerminalSummaryLabel(terminalThreadCount);
+  const detailsLabel = [statusSummaryLabel, terminalSummaryLabel].filter(Boolean).join(". ");
+  const tooltipDetails = [statusSummaryLabel, terminalSummaryLabel].filter(Boolean).join(" · ");
+  const groupSize = groupThreads.length;
+
+  return (
+    <div className="px-1.5">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${detailsLabel ? `. ${detailsLabel}` : ""}`}
+              aria-expanded={groupExpanded}
+              onClick={() => onToggleExpanded(groupKey, !groupExpanded)}
+              className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+            />
+          }
+        >
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out",
+              groupExpanded && "rotate-0",
+            )}
+          />
+          <GitBranchIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-sidebar-muted-foreground/55"
+          />
+          <span className="min-w-0 truncate">{branchLabel}</span>
+          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/70">
+            {groupSize}
+          </span>
+          <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
+          {statusSummary.length > 0 || terminalThreadCount > 0 ? (
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">
+              <SidebarBranchStatusSummary summary={statusSummary} />
+              <SidebarBranchTerminalSummary count={terminalThreadCount} />
+            </span>
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          <span className="font-medium">{branchContextLabel}</span>
+          {tooltipDetails ? (
+            <span className="text-muted-foreground"> · {tooltipDetails}</span>
+          ) : null}
+        </TooltipPopup>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -4150,8 +4247,6 @@ export default function Sidebar() {
                     const groupThreads = activeThreads.slice(index, index + groupSize);
                     const groupKey = `branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`;
                     const groupExpanded = expandedBranchGroupKeys.has(groupKey);
-                    const statusSummary = resolveSidebarBranchStatusSummary(groupThreads);
-                    const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
                     const projectLabel =
                       projectDisplayNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
                       null;
@@ -4175,48 +4270,15 @@ export default function Sidebar() {
 
                     items.push(
                       <li key={groupKey} className="mt-1.5 list-none">
-                        <div className="px-1.5">
-                          <Tooltip>
-                            <TooltipTrigger
-                              render={
-                                <button
-                                  type="button"
-                                  aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${statusSummaryLabel ? `. ${statusSummaryLabel}` : ""}`}
-                                  aria-expanded={groupExpanded}
-                                  onClick={() => setBranchGroupExpanded(groupKey, !groupExpanded)}
-                                  className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
-                                />
-                              }
-                            >
-                              <ChevronDownIcon
-                                aria-hidden
-                                className={cn(
-                                  "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out",
-                                  groupExpanded && "rotate-0",
-                                )}
-                              />
-                              <GitBranchIcon
-                                aria-hidden
-                                className="size-3.5 shrink-0 text-sidebar-muted-foreground/55"
-                              />
-                              <span className="min-w-0 truncate">{branchLabel}</span>
-                              <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/70">
-                                {groupSize}
-                              </span>
-                              <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
-                              <SidebarBranchStatusSummary summary={statusSummary} />
-                            </TooltipTrigger>
-                            <TooltipPopup side="top">
-                              <span className="font-medium">{branchContextLabel}</span>
-                              {statusSummaryLabel ? (
-                                <span className="text-muted-foreground">
-                                  {" "}
-                                  · {statusSummaryLabel}
-                                </span>
-                              ) : null}
-                            </TooltipPopup>
-                          </Tooltip>
-                        </div>
+                        <SidebarBranchGroupHeader
+                          groupKey={groupKey}
+                          groupThreads={groupThreads}
+                          groupExpanded={groupExpanded}
+                          branchLabel={branchLabel}
+                          projectLabel={projectLabel}
+                          branchContextLabel={branchContextLabel}
+                          onToggleExpanded={setBranchGroupExpanded}
+                        />
                         <ul role="list" className="flex flex-col gap-px">
                           {renderThreadRow(groupThreads[0]!, "active", undefined, true)}
                         </ul>

@@ -6,6 +6,7 @@ import {
   buildBulkTitleRegenerationContextMenuItem,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
+  countThreadsWithRunningTerminals,
   filterSidebarProjectScopeItems,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
@@ -778,6 +779,38 @@ describe("resolveSidebarBranchStatusSummary", () => {
 
   it("returns no indicators for a ready-only branch", () => {
     expect(resolveSidebarBranchStatusSummary([idle, idle])).toEqual([]);
+  });
+});
+
+describe("countThreadsWithRunningTerminals", () => {
+  const threads = [{ id: "thread-a" }, { id: "thread-b" }, { id: "thread-c" }];
+
+  it("counts unique threads with a running subprocess, not individual terminals", () => {
+    expect(
+      countThreadsWithRunningTerminals(threads, [
+        { target: { threadId: "thread-a" }, state: { hasRunningSubprocess: true } },
+        { target: { threadId: "thread-a" }, state: { hasRunningSubprocess: true } },
+        { target: { threadId: "thread-b" }, state: { hasRunningSubprocess: true } },
+        { target: { threadId: "thread-c" }, state: { hasRunningSubprocess: false } },
+      ]),
+    ).toBe(2);
+  });
+
+  it("ignores running terminals that belong to threads outside the group", () => {
+    expect(
+      countThreadsWithRunningTerminals(threads, [
+        { target: { threadId: "thread-elsewhere" }, state: { hasRunningSubprocess: true } },
+      ]),
+    ).toBe(0);
+  });
+
+  it("returns zero when no group thread has a running subprocess", () => {
+    expect(
+      countThreadsWithRunningTerminals(threads, [
+        { target: { threadId: "thread-a" }, state: { hasRunningSubprocess: false } },
+      ]),
+    ).toBe(0);
+    expect(countThreadsWithRunningTerminals(threads, [])).toBe(0);
   });
 });
 
