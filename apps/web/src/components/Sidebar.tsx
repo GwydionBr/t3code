@@ -187,6 +187,7 @@ import {
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Button } from "./ui/button";
+import { Collapsible, CollapsiblePanel } from "./ui/collapsible";
 import { Input } from "./ui/input";
 import {
   Combobox,
@@ -218,6 +219,7 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
+const BRANCH_GROUP_ANIMATION_DURATION_MS = 200;
 const expandedBranchGroupsSchema = Schema.Array(Schema.String);
 
 const BRANCH_STATUS_PRESENTATION: Record<
@@ -2356,16 +2358,31 @@ export default function Sidebar() {
     [] as string[],
     expandedBranchGroupsSchema,
   );
+  const listAutoAnimateControllerRef = useRef<ReturnType<typeof autoAnimate> | null>(null);
+  const listAutoAnimateResumeTimerRef = useRef<number | null>(null);
   const expandedBranchGroupKeys = useMemo(
     () => new Set(expandedBranchGroups),
     [expandedBranchGroups],
   );
-  const toggleBranchGroup = useCallback(
-    (groupKey: string) => {
+  const setBranchGroupExpanded = useCallback(
+    (groupKey: string, expanded: boolean) => {
+      // Branch groups own their height transition. Temporarily pause the
+      // parent list's FLIP animation so its ResizeObserver does not compete
+      // with the collapsible panel while that height is changing.
+      listAutoAnimateControllerRef.current?.disable();
+      if (listAutoAnimateResumeTimerRef.current !== null) {
+        window.clearTimeout(listAutoAnimateResumeTimerRef.current);
+      }
+      listAutoAnimateResumeTimerRef.current = window.setTimeout(() => {
+        listAutoAnimateControllerRef.current?.enable();
+        listAutoAnimateResumeTimerRef.current = null;
+      }, BRANCH_GROUP_ANIMATION_DURATION_MS + 20);
       setExpandedBranchGroups((current) =>
-        current.includes(groupKey)
-          ? current.filter((candidate) => candidate !== groupKey)
-          : [...current, groupKey],
+        expanded
+          ? current.includes(groupKey)
+            ? current
+            : [...current, groupKey]
+          : current.filter((candidate) => candidate !== groupKey),
       );
     },
     [setExpandedBranchGroups],
@@ -2431,15 +2448,6 @@ export default function Sidebar() {
     }
     return visible;
   }, [activeThreads, expandedBranchGroupKeys, routeThreadKey]);
-  const renderedActiveThreadKeys = useMemo(
-    () =>
-      new Set(
-        renderedActiveThreads.map((thread) =>
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        ),
-      ),
-    [renderedActiveThreads],
-  );
 
   const orderedThreads = useMemo(
     () => [
@@ -3564,9 +3572,22 @@ export default function Sidebar() {
   }, [shouldShowJumpHintsNow, updateThreadJumpHintsVisibility]);
 
   const attachListAutoAnimateRef = useCallback((node: HTMLUListElement | null) => {
-    if (!node) return;
-    autoAnimate(node, { duration: 150, easing: "ease-out" });
+    const current = listAutoAnimateControllerRef.current;
+    if (current?.parent === node) return;
+    current?.destroy?.();
+    listAutoAnimateControllerRef.current = node
+      ? autoAnimate(node, { duration: 150, easing: "ease-out" })
+      : null;
   }, []);
+
+  useEffect(
+    () => () => {
+      if (listAutoAnimateResumeTimerRef.current !== null) {
+        window.clearTimeout(listAutoAnimateResumeTimerRef.current);
+      }
+    },
+    [],
+  );
 
   // New thread defaults to the project you're in (active thread's project,
   // falling back to the top project) — same resolution the command palette
@@ -4106,26 +4127,10 @@ export default function Sidebar() {
                       />,
                     );
                   }
-                  for (const [index, thread] of activeThreads.entries()) {
-                    const previous = activeThreads[index - 1];
-                    const next = activeThreads[index + 1];
-                    const sharesBranch =
-                      thread.branch !== null &&
-                      ((previous?.branch === thread.branch &&
-                        previous.environmentId === thread.environmentId &&
-                        previous.projectId === thread.projectId) ||
-                        (next?.branch === thread.branch &&
-                          next.environmentId === thread.environmentId &&
-                          next.projectId === thread.projectId));
-                    const startsGroup =
-                      sharesBranch &&
-                      (previous?.branch !== thread.branch ||
-                        previous.environmentId !== thread.environmentId ||
-                        previous.projectId !== thread.projectId);
-                    const groupKey = `branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`;
-                    const groupExpanded = expandedBranchGroupKeys.has(groupKey);
-                    if (startsGroup) {
-                      let groupSize = 1;
+                  for (let index = 0; index < activeThreads.length;) {
+                    const thread = activeThreads[index]!;
+                    let groupSize = 1;
+                    if (thread.branch !== null) {
                       while (
                         activeThreads[index + groupSize]?.branch === thread.branch &&
                         activeThreads[index + groupSize]?.environmentId === thread.environmentId &&
@@ -4133,20 +4138,43 @@ export default function Sidebar() {
                       ) {
                         groupSize += 1;
                       }
-                      const statusSummary = resolveSidebarBranchStatusSummary(
-                        activeThreads.slice(index, index + groupSize),
-                      );
-                      const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
-                      const projectLabel =
-                        projectDisplayNameByKey.get(
-                          `${thread.environmentId}:${thread.projectId}`,
-                        ) ?? null;
-                      const branchLabel = thread.branch ?? "Unknown branch";
-                      const branchContextLabel = projectLabel
-                        ? `${projectLabel} · ${branchLabel}`
-                        : branchLabel;
-                      items.push(
-                        <li key={groupKey} className="mt-1.5 list-none px-1.5">
+                    }
+
+                    if (groupSize === 1) {
+                      items.push(renderThreadRow(thread, "active"));
+                      index += 1;
+                      continue;
+                    }
+
+                    const groupThreads = activeThreads.slice(index, index + groupSize);
+                    const groupKey = `branch:${thread.environmentId}:${thread.projectId}:${thread.branch}`;
+                    const groupExpanded = expandedBranchGroupKeys.has(groupKey);
+                    const statusSummary = resolveSidebarBranchStatusSummary(groupThreads);
+                    const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
+                    const projectLabel =
+                      projectDisplayNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+                      null;
+                    const branchLabel = thread.branch ?? "Unknown branch";
+                    const branchContextLabel = projectLabel
+                      ? `${projectLabel} · ${branchLabel}`
+                      : branchLabel;
+                    const routeThreadIndex = groupThreads.findIndex(
+                      (candidate) =>
+                        scopedThreadKey(scopeThreadRef(candidate.environmentId, candidate.id)) ===
+                        routeThreadKey,
+                    );
+                    const persistentRouteThread =
+                      routeThreadIndex > 0 ? groupThreads[routeThreadIndex] : undefined;
+                    const expandableThreadsBeforeRoute = persistentRouteThread
+                      ? groupThreads.slice(1, routeThreadIndex)
+                      : groupThreads.slice(1);
+                    const expandableThreadsAfterRoute = persistentRouteThread
+                      ? groupThreads.slice(routeThreadIndex + 1)
+                      : [];
+
+                    items.push(
+                      <li key={groupKey} className="mt-1.5 list-none">
+                        <div className="px-1.5">
                           <Tooltip>
                             <TooltipTrigger
                               render={
@@ -4154,7 +4182,7 @@ export default function Sidebar() {
                                   type="button"
                                   aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${statusSummaryLabel ? `. ${statusSummaryLabel}` : ""}`}
                                   aria-expanded={groupExpanded}
-                                  onClick={() => toggleBranchGroup(groupKey)}
+                                  onClick={() => setBranchGroupExpanded(groupKey, !groupExpanded)}
                                   className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                                 />
                               }
@@ -4162,7 +4190,7 @@ export default function Sidebar() {
                               <ChevronDownIcon
                                 aria-hidden
                                 className={cn(
-                                  "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-150",
+                                  "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out",
                                   groupExpanded && "rotate-0",
                                 )}
                               />
@@ -4187,15 +4215,40 @@ export default function Sidebar() {
                               ) : null}
                             </TooltipPopup>
                           </Tooltip>
-                        </li>,
-                      );
-                    }
-                    const threadKey = scopedThreadKey(
-                      scopeThreadRef(thread.environmentId, thread.id),
+                        </div>
+                        <ul role="list" className="flex flex-col gap-px">
+                          {renderThreadRow(groupThreads[0]!, "active", undefined, true)}
+                        </ul>
+                        {expandableThreadsBeforeRoute.length > 0 ? (
+                          <Collapsible open={groupExpanded}>
+                            <CollapsiblePanel className="ease-out motion-reduce:transition-none">
+                              <ul role="list" className="flex flex-col gap-px">
+                                {expandableThreadsBeforeRoute.map((groupThread) =>
+                                  renderThreadRow(groupThread, "active", undefined, true),
+                                )}
+                              </ul>
+                            </CollapsiblePanel>
+                          </Collapsible>
+                        ) : null}
+                        {persistentRouteThread ? (
+                          <ul role="list" className="flex flex-col gap-px">
+                            {renderThreadRow(persistentRouteThread, "active", undefined, true)}
+                          </ul>
+                        ) : null}
+                        {expandableThreadsAfterRoute.length > 0 ? (
+                          <Collapsible open={groupExpanded}>
+                            <CollapsiblePanel className="ease-out motion-reduce:transition-none">
+                              <ul role="list" className="flex flex-col gap-px">
+                                {expandableThreadsAfterRoute.map((groupThread) =>
+                                  renderThreadRow(groupThread, "active", undefined, true),
+                                )}
+                              </ul>
+                            </CollapsiblePanel>
+                          </Collapsible>
+                        ) : null}
+                      </li>,
                     );
-                    if (renderedActiveThreadKeys.has(threadKey)) {
-                      items.push(renderThreadRow(thread, "active", undefined, sharesBranch));
-                    }
+                    index += groupSize;
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the
                   // way, never gone. The header always renders while anything
