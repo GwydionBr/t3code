@@ -20,6 +20,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
+  resolveSidebarBranchStatusSummary,
   resolveThreadRowClassName,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
@@ -723,6 +724,60 @@ describe("resolveSidebarThreadStatus", () => {
 
   it("defaults to ready with no session", () => {
     expect(resolveSidebarThreadStatus({ ...idle, session: null })).toBe("ready");
+  });
+});
+
+describe("resolveSidebarBranchStatusSummary", () => {
+  const idle = {
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    session: null,
+  };
+
+  it("counts actionable, failed, and active states while omitting ready threads", () => {
+    expect(
+      resolveSidebarBranchStatusSummary([
+        { ...idle, hasPendingApprovals: true },
+        { ...idle, hasPendingUserInput: true },
+        {
+          ...idle,
+          session: {
+            threadId: ThreadId.make("failed-thread"),
+            status: "error",
+            providerName: "Codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            activeTurnId: null,
+            lastError: "boom",
+            updatedAt: "2026-03-09T10:00:00.000Z",
+          },
+        },
+        {
+          ...idle,
+          session: {
+            threadId: ThreadId.make("working-thread"),
+            status: "running",
+            providerName: "Codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            activeTurnId: "turn-1" as never,
+            lastError: null,
+            updatedAt: "2026-03-09T10:00:00.000Z",
+          },
+        },
+        { ...idle, backgroundLiveness: "monitoring" },
+        idle,
+      ]),
+    ).toEqual([
+      { status: "approval", count: 1 },
+      { status: "input", count: 1 },
+      { status: "failed", count: 1 },
+      { status: "active", count: 2 },
+    ]);
+  });
+
+  it("returns no indicators for a ready-only branch", () => {
+    expect(resolveSidebarBranchStatusSummary([idle, idle])).toEqual([]);
   });
 });
 

@@ -140,6 +140,7 @@ import {
   planPinnedReorder,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
+  resolveSidebarBranchStatusSummary,
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
   shouldCreateNewThreadInCurrentProject,
@@ -151,6 +152,8 @@ import {
   useRetainedValue,
   useSidebarRowSubscriptionLease,
   useThreadJumpHintVisibility,
+  type SidebarBranchStatus,
+  type SidebarBranchStatusCount,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
@@ -216,6 +219,59 @@ const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
 const expandedBranchGroupsSchema = Schema.Array(Schema.String);
+
+const BRANCH_STATUS_PRESENTATION: Record<
+  SidebarBranchStatus,
+  { readonly description: string; readonly dotClassName: string }
+> = {
+  approval: { description: "awaiting approval", dotClassName: "bg-amber-500 dark:bg-amber-300" },
+  input: { description: "awaiting input", dotClassName: "bg-indigo-500 dark:bg-indigo-300" },
+  failed: { description: "failed", dotClassName: "bg-red-600 dark:bg-red-300" },
+  active: { description: "active", dotClassName: "bg-sky-500 dark:bg-sky-300" },
+};
+
+function branchStatusSummaryLabel(summary: ReadonlyArray<SidebarBranchStatusCount>): string {
+  return summary
+    .map(({ status, count }) => {
+      const description = BRANCH_STATUS_PRESENTATION[status].description;
+      return `${count} thread${count === 1 ? "" : "s"} ${description}`;
+    })
+    .join(", ");
+}
+
+function SidebarBranchStatusSummary({
+  summary,
+}: {
+  readonly summary: ReadonlyArray<SidebarBranchStatusCount>;
+}) {
+  if (summary.length === 0) return null;
+  const label = branchStatusSummaryLabel(summary);
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            aria-hidden
+            className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+          />
+        }
+      >
+        {summary.map(({ status, count }) => (
+          <span key={status} className="inline-flex items-center gap-1">
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                BRANCH_STATUS_PRESENTATION[status].dotClassName,
+              )}
+            />
+            {count}
+          </span>
+        ))}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
+}
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -4087,11 +4143,15 @@ export default function Sidebar() {
                       ) {
                         groupSize += 1;
                       }
+                      const statusSummary = resolveSidebarBranchStatusSummary(
+                        activeThreads.slice(index, index + groupSize),
+                      );
+                      const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
                       items.push(
                         <li key={groupKey} className="mt-2 list-none px-2.5">
                           <button
                             type="button"
-                            aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${thread.branch}`}
+                            aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${thread.branch}${statusSummaryLabel ? `. ${statusSummaryLabel}` : ""}`}
                             aria-expanded={groupExpanded}
                             onClick={() => toggleBranchGroup(groupKey)}
                             className="flex w-full cursor-pointer items-center gap-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 hover:text-sidebar-foreground"
@@ -4105,7 +4165,8 @@ export default function Sidebar() {
                             />
                             <span className="min-w-0 truncate">{thread.branch}</span>
                             <span className="text-sidebar-muted-foreground/45">{groupSize}</span>
-                            <span className="h-px flex-1 bg-sidebar-border/60" />
+                            <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
+                            <SidebarBranchStatusSummary summary={statusSummary} />
                           </button>
                         </li>,
                       );
