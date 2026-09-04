@@ -581,6 +581,28 @@ export function resolveSidebarBranchStatusSummary(
   );
 }
 
+export interface SidebarBranchTerminalSession {
+  readonly target: { readonly threadId: string };
+  readonly state: { readonly hasRunningSubprocess: boolean };
+}
+
+/** Counts threads in the group that currently have a running terminal subprocess.
+    Multiple terminals on one thread still count as one thread. */
+export function countThreadsWithRunningTerminals(
+  threads: ReadonlyArray<{ readonly id: string }>,
+  sessions: ReadonlyArray<SidebarBranchTerminalSession>,
+): number {
+  if (threads.length === 0) return 0;
+  const groupIds = new Set(threads.map((thread) => thread.id));
+  const running = new Set<string>();
+  for (const session of sessions) {
+    if (!session.state.hasRunningSubprocess) continue;
+    const threadId = session.target.threadId;
+    if (groupIds.has(threadId)) running.add(threadId);
+  }
+  return running.size;
+}
+
 /** NaN-safe Date.parse for sort comparators: a malformed timestamp must not
     poison the whole ordering, so it sinks to the epoch instead. */
 export function parseTimestampMs(isoDate: string): number {
