@@ -1484,9 +1484,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       }
       {...(sortable?.listeners ?? {})}
       className={cn(
-        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_96px]",
+        "list-none py-0.5 [content-visibility:auto]",
         props.treeChild &&
-          "relative ml-2.5 pl-2.5 before:absolute before:-inset-y-px before:left-0 before:w-px before:bg-sidebar-border/60",
+          "relative ml-2.5 pl-2.5 [contain-intrinsic-size:auto_78px] before:absolute before:-inset-y-px before:left-0 before:w-px before:bg-sidebar-border/60",
+        !props.treeChild && "[contain-intrinsic-size:auto_96px]",
         sortable?.isDragging && "z-20 opacity-80",
       )}
     >
