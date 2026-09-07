@@ -27,6 +27,10 @@
       "types": "./src/agentAwareness.ts",
       "import": "./src/agentAwareness.ts"
     },
+    "./desktopNotifications": {
+      "types": "./src/desktopNotifications.ts",
+      "import": "./src/desktopNotifications.ts"
+    },
     "./git": {
       "types": "./src/git.ts",
       "import": "./src/git.ts"

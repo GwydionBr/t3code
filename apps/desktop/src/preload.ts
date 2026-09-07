@@ -164,6 +164,40 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(IpcChannels.WINDOW_FULLSCREEN_STATE_CHANNEL, wrappedListener);
     };
   },
+  getWindowFocusState: () =>
+    ipcRenderer.sendSync(IpcChannels.GET_WINDOW_FOCUS_STATE_CHANNEL) === true,
+  onWindowFocusStateChange: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, focused: unknown) => {
+      if (typeof focused !== "boolean") return;
+      listener(focused);
+    };
+
+    ipcRenderer.on(IpcChannels.WINDOW_FOCUS_STATE_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.WINDOW_FOCUS_STATE_CHANNEL, wrappedListener);
+    };
+  },
+  showNotification: (intent) => ipcRenderer.invoke(IpcChannels.SHOW_NOTIFICATION_CHANNEL, intent),
+  onNavigateToThread: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, ref: unknown) => {
+      if (
+        typeof ref !== "object" ||
+        ref === null ||
+        !("environmentId" in ref) ||
+        !("threadId" in ref) ||
+        typeof ref.environmentId !== "string" ||
+        typeof ref.threadId !== "string"
+      ) {
+        return;
+      }
+      listener(ref as Parameters<typeof listener>[0]);
+    };
+
+    ipcRenderer.on(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, wrappedListener);
+    };
+  },
   getUpdateState: () => ipcRenderer.invoke(IpcChannels.UPDATE_GET_STATE_CHANNEL),
   setUpdateChannel: (channel) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, channel),

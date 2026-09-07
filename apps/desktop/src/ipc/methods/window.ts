@@ -2,6 +2,7 @@ import {
   ContextMenuItemSchema,
   DesktopAppBrandingSchema,
   DesktopEnvironmentBootstrapSchema,
+  DesktopNotificationIntentSchema,
   DesktopThemeSchema,
   EDITORS,
   EditorId,
@@ -13,6 +14,7 @@ import {
   type DesktopEnvironmentBootstrap,
   type PickedThemeFile,
 } from "@t3tools/contracts";
+import { Notification } from "electron";
 import { WORKSPACE_IMAGE_PREVIEW_EXTENSIONS } from "@t3tools/shared/filePreview";
 import { isCommandAvailable } from "@t3tools/shared/shell";
 import * as NodeOS from "node:os";
@@ -83,6 +85,43 @@ export const getWindowFullscreenState = DesktopIpc.makeSyncIpcMethod({
     const electronWindow = yield* ElectronWindow.ElectronWindow;
     const window = yield* electronWindow.currentMainOrFirst;
     return Option.isSome(window) && window.value.isFullScreen();
+  }),
+});
+
+export const getWindowFocusState = DesktopIpc.makeSyncIpcMethod({
+  channel: IpcChannels.GET_WINDOW_FOCUS_STATE_CHANNEL,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.getWindowFocusState")(function* () {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* electronWindow.currentMainOrFirst;
+    return Option.isSome(window) && window.value.isFocused();
+  }),
+});
+
+export const showNotification = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.SHOW_NOTIFICATION_CHANNEL,
+  payload: DesktopNotificationIntentSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.showNotification")(function* (intent) {
+    if (!Notification.isSupported()) return;
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* electronWindow.currentMainOrFirst;
+    const notification = new Notification({ title: intent.title, body: intent.body });
+    // Clicking routes to the thread: reveal the window and push a navigate
+    // event the renderer turns into a router navigation. Raw BrowserWindow
+    // calls keep this callback free of the Effect runtime.
+    notification.on("click", () => {
+      if (Option.isNone(window) || window.value.isDestroyed()) return;
+      const win = window.value;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      win.webContents.send(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, {
+        environmentId: intent.environmentId,
+        threadId: intent.threadId,
+      });
+    });
+    notification.show();
   }),
 });
 

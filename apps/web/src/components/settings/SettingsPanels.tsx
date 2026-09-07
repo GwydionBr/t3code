@@ -2015,6 +2015,93 @@ function LegacyFeaturesSection() {
   );
 }
 
+// Desktop-only. Native OS notifications for agent moments while the window is
+// unfocused. The master switch gates the four independent per-moment toggles;
+// turning any of them off (or the master) is the way out.
+function DesktopNotificationsSection() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const notifications = settings.desktopNotifications;
+  const defaults = DEFAULT_UNIFIED_SETTINGS.desktopNotifications;
+  const setNotifications = (patch: Partial<typeof notifications>) =>
+    updateSettings({ desktopNotifications: { ...notifications, ...patch } });
+  const isDirty = (Object.keys(defaults) as Array<keyof typeof defaults>).some(
+    (key) => notifications[key] !== defaults[key],
+  );
+  const momentDisabled = !notifications.enabled;
+  return (
+    <SettingsSection id="notifications" title="Notifications">
+      <SettingsRow
+        {...searchableSetting("desktop-notifications")}
+        description="Show a native notification when a thread needs you while the T3 Code window is in the background. Choose which moments notify you below."
+        resetAction={
+          isDirty ? (
+            <SettingResetButton
+              label="desktop notifications"
+              onClick={() => updateSettings({ desktopNotifications: defaults })}
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={notifications.enabled}
+            onCheckedChange={(checked) => setNotifications({ enabled: Boolean(checked) })}
+            aria-label="Enable desktop notifications"
+          />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("desktop-notifications-approval")}
+        description="An agent is blocked waiting for you to approve an action."
+        control={
+          <Switch
+            disabled={momentDisabled}
+            checked={notifications.approvalNeeded}
+            onCheckedChange={(checked) => setNotifications({ approvalNeeded: Boolean(checked) })}
+            aria-label="Notify when approval is needed"
+          />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("desktop-notifications-input")}
+        description="An agent is waiting for your input to keep going."
+        control={
+          <Switch
+            disabled={momentDisabled}
+            checked={notifications.inputNeeded}
+            onCheckedChange={(checked) => setNotifications({ inputNeeded: Boolean(checked) })}
+            aria-label="Notify when input is needed"
+          />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("desktop-notifications-finished")}
+        description="An agent finished its turn. Off by default as the noisiest moment."
+        control={
+          <Switch
+            disabled={momentDisabled}
+            checked={notifications.finished}
+            onCheckedChange={(checked) => setNotifications({ finished: Boolean(checked) })}
+            aria-label="Notify when the agent finishes"
+          />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("desktop-notifications-failed")}
+        description="An agent run or its provider failed."
+        control={
+          <Switch
+            disabled={momentDisabled}
+            checked={notifications.failed}
+            onCheckedChange={(checked) => setNotifications({ failed: Boolean(checked) })}
+            aria-label="Notify when the agent fails"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
 export function GeneralSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
@@ -2752,6 +2839,8 @@ export function GeneralSettingsPanel() {
           />
         ) : null}
       </SettingsSection>
+
+      {isElectron ? <DesktopNotificationsSection /> : null}
 
       <SettingsSection id="text-generation" title="Text generation">
         <SettingsRow

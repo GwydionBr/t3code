@@ -15,6 +15,7 @@ import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings"
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { useEnvironmentIdentificationMode, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useDesktopNotifications } from "../hooks/useDesktopNotifications";
 import {
   PanelAnimationSuppressionProvider,
   usePanelAnimationSettings,
@@ -143,6 +144,7 @@ function ProjectProjectionRetention() {
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
+  useDesktopNotifications();
   const legacySidebarEnabled = useLegacySidebarEnabled();
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();

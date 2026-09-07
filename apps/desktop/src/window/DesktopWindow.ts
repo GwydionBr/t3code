@@ -21,6 +21,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import {
   MENU_ACTION_CHANNEL,
   QUIT_SHORTCUT_CHANNEL,
+  WINDOW_FOCUS_STATE_CHANNEL,
   WINDOW_FULLSCREEN_STATE_CHANNEL,
 } from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
@@ -621,6 +622,15 @@ export const make = Effect.gen(function* () {
         window.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, false);
       });
     }
+
+    // Focus state drives client-side native notifications, which only fire
+    // while the window is unfocused. Unlike fullscreen this is not macOS-gated.
+    window.on("focus", () => {
+      window.webContents.send(WINDOW_FOCUS_STATE_CHANNEL, true);
+    });
+    window.on("blur", () => {
+      window.webContents.send(WINDOW_FOCUS_STATE_CHANNEL, false);
+    });
 
     let developmentLoadRetryIndex = 0;
     let developmentLoadRetryFiber: Fiber.Fiber<void, never> | undefined;
