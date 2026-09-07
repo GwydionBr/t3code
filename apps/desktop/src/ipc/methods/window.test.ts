@@ -2,18 +2,41 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 
 import type * as Electron from "electron";
+
+const { notificationListeners, notificationShow } = vi.hoisted(() => ({
+  notificationListeners: new Map<string, () => void>(),
+  notificationShow: vi.fn(),
+}));
+
+vi.mock("electron", () => ({
+  Notification: class {
+    static isSupported() {
+      return true;
+    }
+
+    on(event: string, listener: () => void) {
+      notificationListeners.set(event, listener);
+    }
+
+    show() {
+      notificationShow();
+    }
+  },
+}));
 
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import * as DesktopWindow from "../../window/DesktopWindow.ts";
 import {
   getLocalEnvironmentBootstraps,
   getWindowFullscreenState,
   pickProjectFavicon,
+  showNotification,
 } from "./window.ts";
 
 const readyWslConfig: DesktopBackendManager.DesktopBackendStartConfig = {
@@ -151,6 +174,74 @@ describe("getWindowFullscreenState", () => {
       ),
     );
   });
+});
+
+describe("showNotification", () => {
+  it.effect(
+    "resolves the main window on click and waits for its renderer before navigating",
+    () => {
+      const send = vi.fn();
+      const staleSend = vi.fn();
+      const staleWindow = {
+        isDestroyed: () => false,
+        isMinimized: () => false,
+        show: vi.fn(),
+        focus: vi.fn(),
+        webContents: { send: staleSend },
+      } as unknown as Electron.BrowserWindow;
+      let finishLoading: (() => void) | undefined;
+      const window = {
+        isDestroyed: () => false,
+        webContents: {
+          isLoadingMainFrame: () => true,
+          once: (event: string, listener: () => void) => {
+            assert.strictEqual(event, "did-finish-load");
+            finishLoading = listener;
+          },
+          send,
+        },
+      } as unknown as Electron.BrowserWindow;
+      const revealOrCreateMain = vi.fn(() => Effect.succeed(window));
+
+      return Effect.gen(function* () {
+        yield* showNotification.handler({
+          title: "Done",
+          body: "The agent finished",
+          environmentId: "local",
+          threadId: "thread-1",
+        });
+
+        notificationListeners.get("click")?.();
+        yield* Effect.promise(() =>
+          vi.waitFor(() => expect(revealOrCreateMain).toHaveBeenCalledOnce()),
+        );
+        assert.isUndefined(send.mock.lastCall);
+        assert.isUndefined(staleSend.mock.lastCall);
+
+        finishLoading?.();
+        yield* Effect.promise(() =>
+          vi.waitFor(() =>
+            expect(send).toHaveBeenCalledWith("desktop:navigate-to-thread", {
+              environmentId: "local",
+              threadId: "thread-1",
+            }),
+          ),
+        );
+        expect(revealOrCreateMain).toHaveBeenCalledTimes(2);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(ElectronWindow.ElectronWindow)({
+              currentMainOrFirst: Effect.succeed(Option.some(staleWindow)),
+            }),
+            Layer.mock(DesktopWindow.DesktopWindow)({
+              revealOrCreateMain: Effect.suspend(revealOrCreateMain),
+            }),
+          ),
+        ),
+      );
+    },
+  );
 });
 
 describe("pickProjectFavicon", () => {

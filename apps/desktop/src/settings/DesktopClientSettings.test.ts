@@ -62,6 +62,13 @@ const clientSettings: ClientSettings = {
   loadBalancingWeights: { "environment-1": 75, "environment-2": 0 },
   timestampFormat: "24-hour",
   wordWrap: true,
+  desktopNotifications: {
+    enabled: true,
+    approvalNeeded: true,
+    inputNeeded: true,
+    finished: false,
+    failed: true,
+  },
 };
 
 const decodeClientSettingsJson = Schema.decodeEffect(Schema.fromJsonString(ClientSettingsSchema));

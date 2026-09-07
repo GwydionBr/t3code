@@ -2,6 +2,7 @@ import {
   ContextMenuItemSchema,
   DesktopAppBrandingSchema,
   DesktopEnvironmentBootstrapSchema,
+  DesktopNotificationIntentSchema,
   DesktopThemeSchema,
   EDITORS,
   EditorId,
@@ -13,6 +14,7 @@ import {
   type DesktopEnvironmentBootstrap,
   type PickedThemeFile,
 } from "@t3tools/contracts";
+import { Notification } from "electron";
 import { WORKSPACE_IMAGE_PREVIEW_EXTENSIONS } from "@t3tools/shared/filePreview";
 import { isCommandAvailable } from "@t3tools/shared/shell";
 import * as NodeOS from "node:os";
@@ -34,6 +36,7 @@ import * as ElectronMenu from "../../electron/ElectronMenu.ts";
 import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import * as DesktopWindow from "../../window/DesktopWindow.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 import {
@@ -83,6 +86,64 @@ export const getWindowFullscreenState = DesktopIpc.makeSyncIpcMethod({
     const electronWindow = yield* ElectronWindow.ElectronWindow;
     const window = yield* electronWindow.currentMainOrFirst;
     return Option.isSome(window) && window.value.isFullScreen();
+  }),
+});
+
+export const getWindowFocusState = DesktopIpc.makeSyncIpcMethod({
+  channel: IpcChannels.GET_WINDOW_FOCUS_STATE_CHANNEL,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.getWindowFocusState")(function* () {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* electronWindow.currentMainOrFirst;
+    return Option.isSome(window) && window.value.isFocused();
+  }),
+});
+
+export const showNotification = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.SHOW_NOTIFICATION_CHANNEL,
+  payload: DesktopNotificationIntentSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.showNotification")(function* (intent) {
+    if (!Notification.isSupported()) return;
+    const desktopWindow = yield* DesktopWindow.DesktopWindow;
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+    const notification = new Notification({ title: intent.title, body: intent.body });
+    notification.on("click", () => {
+      const sendToCurrentMain = () =>
+        desktopWindow.revealOrCreateMain.pipe(
+          Effect.tap((window) =>
+            Effect.sync(() => {
+              if (window.isDestroyed()) return;
+              window.webContents.send(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, {
+                environmentId: intent.environmentId,
+                threadId: intent.threadId,
+              });
+            }),
+          ),
+          Effect.ignore,
+        );
+
+      void runPromise(
+        desktopWindow.revealOrCreateMain.pipe(
+          Effect.tap((window) =>
+            Effect.sync(() => {
+              if (window.webContents.isLoadingMainFrame()) {
+                window.webContents.once("did-finish-load", () => {
+                  void runPromise(sendToCurrentMain());
+                });
+                return;
+              }
+              window.webContents.send(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, {
+                environmentId: intent.environmentId,
+                threadId: intent.threadId,
+              });
+            }),
+          ),
+          Effect.ignore,
+        ),
+      );
+    });
+    notification.show();
   }),
 });
 

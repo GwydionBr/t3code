@@ -87,7 +87,7 @@ import type {
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
-import { EnvironmentId } from "./baseSchemas.ts";
+import { EnvironmentId, ThreadId } from "./baseSchemas.ts";
 import { BrowserProfileId } from "./browserProfile.ts";
 import type {
   BrowserImportResult,
@@ -275,6 +275,25 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
   checked: Schema.Boolean,
   state: DesktopUpdateStateSchema,
 });
+
+// Payload for a native desktop notification raised for an agent moment. The
+// pure decision function in `@t3tools/shared/desktopNotifications` produces a
+// value of this shape; the main process shows it and routes the click back to
+// the thread it names.
+export const DesktopNotificationIntentSchema = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  title: Schema.String,
+  body: Schema.String,
+});
+export type DesktopNotificationIntent = typeof DesktopNotificationIntentSchema.Type;
+
+// Where a clicked notification asks the renderer to navigate.
+export const DesktopNavigateToThreadRefSchema = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+});
+export type DesktopNavigateToThreadRef = typeof DesktopNavigateToThreadRefSchema.Type;
 
 // Stable id for the Windows-native primary backend. Desktop side wraps
 // this with a brand inside DesktopBackendManager; web side keeps it as
@@ -1145,6 +1164,26 @@ export interface DesktopBridge {
   onQuitShortcut?: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
+  /**
+   * Whether the desktop window currently has OS focus. Drives client-side
+   * native notifications, which only fire while the window is unfocused.
+   * Optional: older desktop builds lack it (callers treat it as focused).
+   */
+  getWindowFocusState?: () => boolean;
+  onWindowFocusStateChange?: (listener: (focused: boolean) => void) => () => void;
+  /**
+   * Atomically subscribes to focus changes and synchronously invokes the
+   * listener with the initial snapshot after registration.
+   */
+  subscribeWindowFocusState?: (listener: (focused: boolean) => void) => () => void;
+  /**
+   * Raise an OS-native notification for an agent moment. Clicking it reveals
+   * the window and pushes `onNavigateToThread`. Optional: older desktop builds
+   * lack it, and the renderer no-ops when it is missing.
+   */
+  showNotification?: (intent: DesktopNotificationIntent) => Promise<void>;
+  /** Fired when a notification is clicked, so the renderer can route to it. */
+  onNavigateToThread?: (listener: (ref: DesktopNavigateToThreadRef) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;

@@ -8,6 +8,7 @@ import { exposeClerkBridge } from "@clerk/electron/preload";
 import { contextBridge, ipcRenderer } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
+import { subscribeWindowFocusState } from "./ipc/windowFocusSubscription.ts";
 
 exposeClerkBridge({ passkeys: true });
 
@@ -162,6 +163,41 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.on(IpcChannels.WINDOW_FULLSCREEN_STATE_CHANNEL, wrappedListener);
     return () => {
       ipcRenderer.removeListener(IpcChannels.WINDOW_FULLSCREEN_STATE_CHANNEL, wrappedListener);
+    };
+  },
+  getWindowFocusState: () =>
+    ipcRenderer.sendSync(IpcChannels.GET_WINDOW_FOCUS_STATE_CHANNEL) === true,
+  subscribeWindowFocusState: (listener) => subscribeWindowFocusState(ipcRenderer, listener),
+  onWindowFocusStateChange: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, focused: unknown) => {
+      if (typeof focused !== "boolean") return;
+      listener(focused);
+    };
+
+    ipcRenderer.on(IpcChannels.WINDOW_FOCUS_STATE_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.WINDOW_FOCUS_STATE_CHANNEL, wrappedListener);
+    };
+  },
+  showNotification: (intent) => ipcRenderer.invoke(IpcChannels.SHOW_NOTIFICATION_CHANNEL, intent),
+  onNavigateToThread: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, ref: unknown) => {
+      if (
+        typeof ref !== "object" ||
+        ref === null ||
+        !("environmentId" in ref) ||
+        !("threadId" in ref) ||
+        typeof ref.environmentId !== "string" ||
+        typeof ref.threadId !== "string"
+      ) {
+        return;
+      }
+      listener(ref as Parameters<typeof listener>[0]);
+    };
+
+    ipcRenderer.on(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, wrappedListener);
     };
   },
   getUpdateState: () => ipcRenderer.invoke(IpcChannels.UPDATE_GET_STATE_CHANNEL),
