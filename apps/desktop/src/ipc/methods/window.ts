@@ -36,6 +36,7 @@ import * as ElectronMenu from "../../electron/ElectronMenu.ts";
 import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import * as DesktopWindow from "../../window/DesktopWindow.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 import {
@@ -104,22 +105,43 @@ export const showNotification = DesktopIpc.makeIpcMethod({
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.window.showNotification")(function* (intent) {
     if (!Notification.isSupported()) return;
-    const electronWindow = yield* ElectronWindow.ElectronWindow;
-    const window = yield* electronWindow.currentMainOrFirst;
+    const desktopWindow = yield* DesktopWindow.DesktopWindow;
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
     const notification = new Notification({ title: intent.title, body: intent.body });
-    // Clicking routes to the thread: reveal the window and push a navigate
-    // event the renderer turns into a router navigation. Raw BrowserWindow
-    // calls keep this callback free of the Effect runtime.
     notification.on("click", () => {
-      if (Option.isNone(window) || window.value.isDestroyed()) return;
-      const win = window.value;
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
-      win.webContents.send(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, {
-        environmentId: intent.environmentId,
-        threadId: intent.threadId,
-      });
+      const sendToCurrentMain = () =>
+        desktopWindow.revealOrCreateMain.pipe(
+          Effect.tap((window) =>
+            Effect.sync(() => {
+              if (window.isDestroyed()) return;
+              window.webContents.send(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, {
+                environmentId: intent.environmentId,
+                threadId: intent.threadId,
+              });
+            }),
+          ),
+          Effect.ignore,
+        );
+
+      void runPromise(
+        desktopWindow.revealOrCreateMain.pipe(
+          Effect.tap((window) =>
+            Effect.sync(() => {
+              if (window.webContents.isLoadingMainFrame()) {
+                window.webContents.once("did-finish-load", () => {
+                  void runPromise(sendToCurrentMain());
+                });
+                return;
+              }
+              window.webContents.send(IpcChannels.NAVIGATE_TO_THREAD_CHANNEL, {
+                environmentId: intent.environmentId,
+                threadId: intent.threadId,
+              });
+            }),
+          ),
+          Effect.ignore,
+        ),
+      );
     });
     notification.show();
   }),

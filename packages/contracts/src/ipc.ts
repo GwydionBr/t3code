@@ -1172,6 +1172,11 @@ export interface DesktopBridge {
   getWindowFocusState?: () => boolean;
   onWindowFocusStateChange?: (listener: (focused: boolean) => void) => () => void;
   /**
+   * Atomically subscribes to focus changes and synchronously invokes the
+   * listener with the initial snapshot after registration.
+   */
+  subscribeWindowFocusState?: (listener: (focused: boolean) => void) => () => void;
+  /**
    * Raise an OS-native notification for an agent moment. Clicking it reveals
    * the window and pushes `onNavigateToThread`. Optional: older desktop builds
    * lack it, and the renderer no-ops when it is missing.
