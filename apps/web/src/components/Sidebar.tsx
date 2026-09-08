@@ -2679,6 +2679,9 @@ export default function Sidebar() {
     readonly section: "pinned" | "active" | "settled";
     readonly occurredAt: string;
     readonly clearsSnooze: boolean;
+    /** Every thread the drop projects into `section`. Defaults to `[key]`; a
+        whole-group move carries all its members so they all land at once. */
+    readonly memberKeys?: readonly string[];
     /** Full destination order for pinned and active drops. */
     readonly order: readonly string[] | null;
     /** Destination order keys before the drop, to recognize concurrent writes. */
@@ -2702,6 +2705,11 @@ export default function Sidebar() {
     // memo exactly at the next wake boundary.
     void snoozeWakeTick;
     const preciseNow = new Date().toISOString();
+    // A single-thread drop projects just its row; a group move projects every
+    // member into the destination at once (all share the drop's section).
+    const optimisticMemberKeys = new Set(
+      optimisticDrop === null ? [] : (optimisticDrop.memberKeys ?? [optimisticDrop.key]),
+    );
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
@@ -2729,7 +2737,7 @@ export default function Sidebar() {
       if (capabilities?.threadPinning === true && capabilities.threadPinReorder === true) {
         draggable.add(threadKey);
       }
-      if (optimisticDrop?.key === threadKey) {
+      if (optimisticDrop !== null && optimisticMemberKeys.has(threadKey)) {
         const projected = applySidebarThreadDrop(
           thread,
           optimisticDrop.section,
@@ -3704,7 +3712,8 @@ export default function Sidebar() {
     (groupKey: string, overId: string) => {
       const memberKeys = groupMemberKeysOf(groupKey);
       const target = resolveSidebarGroupDropTarget(sidebarListItems, groupKey, memberKeys, overId);
-      if (target === null) return { plan: { kind: "none" } as SidebarGroupDropPlan, memberKeys };
+      if (target === null)
+        return { plan: { kind: "none" } as SidebarGroupDropPlan, memberKeys, target: null };
       const leadThread = threadByKey.get(memberKeys[0] ?? "");
       const plan = planSidebarGroupDrop({
         memberKeys,
@@ -3720,7 +3729,7 @@ export default function Sidebar() {
         activeReorderableKeys: activeReorderableThreadKeys,
         activeBranchKeyById,
       });
-      return { plan, memberKeys };
+      return { plan, memberKeys, target };
     },
     [
       activeBranchKeyById,
@@ -3812,9 +3821,49 @@ export default function Sidebar() {
         // Same resolver the collision check used; live membership reconciles
         // the frozen drag against current state (a member settled/closed
         // mid-drag drops out, a group shrunk to one becomes a plain reorder).
-        const { plan: groupPlan, memberKeys } = buildGroupDropPlan(draggedGroupKey, overId);
-        if (groupPlan.kind === "none") return;
+        const { plan: groupPlan, memberKeys, target } = buildGroupDropPlan(draggedGroupKey, overId);
+        if (groupPlan.kind === "none" || target === null) return;
         const memberSet = new Set(memberKeys);
+        // Hold the block at its dropped position while the per-member commands
+        // apply, exactly like a single-thread drop — otherwise the group snaps
+        // back until the reorder events return. Section, order, and keys mirror
+        // the plan so grouping re-sorts the members straight to the new spot.
+        const groupAssignedKeys = new Map(
+          (groupPlan.kind === "settle-group" ? [] : groupPlan.assignments).map(
+            ({ id, orderKey }) => [id, orderKey] as const,
+          ),
+        );
+        // Project every member plus any neighbor the plan re-keys (a keyless
+        // neighbor forces a section rewrite), so the optimistic order matches
+        // what the commands will produce.
+        const projectedKeys = [...new Set([...memberKeys, ...groupAssignedKeys.keys()])];
+        const groupDrop = {
+          key: memberKeys[0]!,
+          memberKeys: projectedKeys,
+          sourceSection: "active" as const,
+          section:
+            groupPlan.kind === "reorder-active-group"
+              ? ("active" as const)
+              : groupPlan.kind === "pin-group"
+                ? ("pinned" as const)
+                : ("settled" as const),
+          occurredAt: new Date().toISOString(),
+          clearsSnooze: groupPlan.kind !== "reorder-active-group",
+          order:
+            groupPlan.kind === "reorder-active-group"
+              ? groupPlan.order
+              : groupPlan.kind === "pin-group"
+                ? target.pinnedOrder
+                : null,
+          keysAtDrop:
+            groupPlan.kind === "pin-group"
+              ? pinnedKeysById
+              : groupPlan.kind === "reorder-active-group"
+                ? activeKeysById
+                : new Map<string, string | null>(),
+          assignedKeys: groupAssignedKeys,
+        };
+        setOptimisticDrop(groupDrop);
         const refOf = (key: string) => {
           const thread = threadByKey.get(key);
           return thread === undefined
@@ -3883,6 +3932,9 @@ export default function Sidebar() {
               continue;
             }
             if (isAtomCommandInterrupted(result)) return;
+            // The move failed: drop the held preview so the block returns to
+            // its origin, but never clobber a newer drag's hold.
+            setOptimisticDrop((current) => (current === groupDrop ? null : current));
             // A half-moved group splits the block, so undo what landed, in
             // reverse so the earliest write settles back last.
             for (const done of applied.toReversed()) {
