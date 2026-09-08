@@ -4,6 +4,7 @@ import {
   DndContext,
   useSensor,
   useSensors,
+  type DraggableSyntheticListeners,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -646,8 +647,10 @@ function SortableSidebarMarker(props: {
 }
 
 // A collapsible header for a run of active threads that share a git branch.
-// Draggable:false — it rides the reflow with the other structural markers and
-// is never a drop target. Toggling folds the group down to its lead row.
+// The header itself is the group's drag handle (ADR 0001): the drag listeners
+// live on its button, so pressing-and-moving lifts the whole block while a
+// plain click still toggles the group (the pointer sensor's distance
+// threshold separates the two, exactly like a thread row).
 function SidebarBranchGroupHeader({
   groupKey,
   groupThreads,
@@ -656,6 +659,7 @@ function SidebarBranchGroupHeader({
   projectLabel,
   branchContextLabel,
   onToggleExpanded,
+  dragListeners,
 }: {
   readonly groupKey: string;
   readonly groupThreads: ReadonlyArray<EnvironmentThreadShell>;
@@ -664,6 +668,9 @@ function SidebarBranchGroupHeader({
   readonly projectLabel: string | null;
   readonly branchContextLabel: string;
   readonly onToggleExpanded: (groupKey: string, expanded: boolean) => void;
+  /** dnd-kit activator listeners, or undefined when the group cannot be
+      dragged (e.g. a server without active reordering). */
+  readonly dragListeners: DraggableSyntheticListeners;
 }) {
   const statusSummary = resolveSidebarBranchStatusSummary(groupThreads);
   const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
@@ -687,6 +694,10 @@ function SidebarBranchGroupHeader({
               aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${detailsLabel ? `. ${detailsLabel}` : ""}`}
               aria-expanded={groupExpanded}
               onClick={() => onToggleExpanded(groupKey, !groupExpanded)}
+              // touch-action:none lets the pointer sensor own vertical drags on
+              // touch without the page scrolling away from under the gesture.
+              style={dragListeners ? { touchAction: "none" } : undefined}
+              {...dragListeners}
               className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
             />
           }
@@ -726,13 +737,14 @@ function SidebarBranchGroupHeader({
 }
 
 // The branch header is the drag handle for the whole group (ADR 0001): picking
-// it up moves every member as one block. Listeners sit on the row like a thread
-// row's; the pointer sensor's distance constraint keeps the header's toggle
-// click working. Disabled while a drop is settling or the group cannot reorder.
+// it up moves every member as one block. The li owns the sortable node and its
+// reflow transform; the activator listeners are handed to the header's button
+// (via the render child) so the press lands on the element the user actually
+// touches. Disabled while a drop is settling or the group cannot reorder.
 function SortableSidebarBranchHeader(props: {
   groupKey: string;
   disabled: boolean;
-  children: ReactNode;
+  children: (dragListeners: DraggableSyntheticListeners) => ReactNode;
 }) {
   const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: sidebarBranchHeaderId(props.groupKey),
@@ -750,9 +762,8 @@ function SortableSidebarBranchHeader(props: {
         visibility: transform?.scaleY === 0 ? "hidden" : undefined,
         ...(isDragging ? { position: "relative", zIndex: 1 } : null),
       }}
-      {...listeners}
     >
-      {props.children}
+      {props.children(listeners)}
     </li>
   );
 }
@@ -3584,9 +3595,13 @@ export default function Sidebar() {
     visibleSnoozedThreads,
   ]);
   useEffect(() => {
+    // Cancel a drag whose lifted item left the list (e.g. a thread archived, or
+    // a branch group dissolved, mid-drag). The dragged id is a thread key or a
+    // branch-header id, so match on the sortable id — matching only thread rows
+    // would cancel every group-header drag the instant it started.
     if (
       dragState !== null &&
-      !sidebarListItems.some((item) => item.kind === "thread" && item.key === dragState.activeKey)
+      !sidebarListItems.some((item) => sidebarListItemId(item) === dragState.activeKey)
     ) {
       cancelThreadDrag();
     }
@@ -5274,17 +5289,24 @@ export default function Sidebar() {
                               groupKey={item.groupKey}
                               disabled={!groupDraggable}
                             >
-                              <SidebarBranchGroupHeader
-                                groupKey={item.groupKey}
-                                groupThreads={group.threads}
-                                groupExpanded={effectiveExpandedBranchGroupKeys.has(item.groupKey)}
-                                branchLabel={group.branch}
-                                projectLabel={projectLabel}
-                                branchContextLabel={
-                                  projectLabel ? `${projectLabel} · ${group.branch}` : group.branch
-                                }
-                                onToggleExpanded={setBranchGroupExpanded}
-                              />
+                              {(dragListeners) => (
+                                <SidebarBranchGroupHeader
+                                  groupKey={item.groupKey}
+                                  groupThreads={group.threads}
+                                  groupExpanded={effectiveExpandedBranchGroupKeys.has(
+                                    item.groupKey,
+                                  )}
+                                  branchLabel={group.branch}
+                                  projectLabel={projectLabel}
+                                  branchContextLabel={
+                                    projectLabel
+                                      ? `${projectLabel} · ${group.branch}`
+                                      : group.branch
+                                  }
+                                  onToggleExpanded={setBranchGroupExpanded}
+                                  dragListeners={dragListeners}
+                                />
+                              )}
                             </SortableSidebarBranchHeader>,
                           );
                           continue;
