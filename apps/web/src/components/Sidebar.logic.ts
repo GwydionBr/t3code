@@ -114,12 +114,26 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
   return `${SIDEBAR_MARKER_PREFIX}${marker}`;
 }
 
+/** Prefix for branch-group header slots. Colon-free like the marker prefix so
+    it never collides with a scoped thread key (those always contain a colon).
+    The group key trailing it is opaque here — nothing parses past the prefix. */
+const SIDEBAR_BRANCH_HEADER_PREFIX = "sidebar-branch-";
+
+export function sidebarBranchHeaderId(groupKey: string): string {
+  return `${SIDEBAR_BRANCH_HEADER_PREFIX}${groupKey}`;
+}
+
 export type SidebarListItem =
   | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
-  | { readonly kind: "marker"; readonly marker: SidebarListMarker };
+  | { readonly kind: "marker"; readonly marker: SidebarListMarker }
+  /** A collapsible branch-group header sitting inside the active run. Sortable
+      but never draggable, and never a drop target — it just rides the reflow. */
+  | { readonly kind: "branch-header"; readonly groupKey: string };
 
 export function sidebarListItemId(item: SidebarListItem): string {
-  return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
+  if (item.kind === "thread") return item.key;
+  if (item.kind === "branch-header") return sidebarBranchHeaderId(item.groupKey);
+  return sidebarMarkerId(item.marker);
 }
 
 /** The section a slot belongs to, read off the markers around it: from
@@ -165,7 +179,11 @@ export function resolveSidebarDropTarget(
     if (item.kind === "marker") {
       if (item.marker === "pinned-divider") currentSection = "active";
       else if (item.marker === "snoozed-header" || item.marker === "settled-header") break;
-    } else if (currentSection === "pinned") pinnedOrder.push(item.key);
+      continue;
+    }
+    // Branch-group headers carry no thread key; they never join an order.
+    if (item.kind !== "thread") continue;
+    if (currentSection === "pinned") pinnedOrder.push(item.key);
     else activeOrder.push(item.key);
   }
   return { section, pinnedOrder, activeOrder };
@@ -215,6 +233,29 @@ export function resolveSidebarDropVerb(
   return "wake";
 }
 
+/** True when every branch group in `order` stays a single contiguous run.
+    This is how active drag-and-drop enforces "branch groups are blocks": a drop
+    is allowed only if it neither splits a group nor interleaves two. Callers map
+    each active thread key to its group key (branchless threads get a unique key,
+    so they never merge and a singleton can still move where it splits nothing).
+    Keys absent from the map are hidden/filtered rows and are ignored. */
+export function activeOrderKeepsBranchGroupsContiguous(
+  order: readonly string[],
+  branchKeyById: ReadonlyMap<string, string>,
+): boolean {
+  const closed = new Set<string>();
+  let current: string | undefined;
+  for (const id of order) {
+    const key = branchKeyById.get(id);
+    if (key === undefined) continue;
+    if (key === current) continue;
+    if (closed.has(key)) return false;
+    if (current !== undefined) closed.add(current);
+    current = key;
+  }
+  return true;
+}
+
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
   readonly activeSection: SidebarSection;
@@ -230,6 +271,9 @@ export function planSidebarThreadDrop(input: {
   readonly activeOrder: readonly string[];
   readonly activeKeysById: ReadonlyMap<string, string | null | undefined>;
   readonly activeReorderableKeys?: ReadonlySet<string>;
+  /** Active thread key → branch group key. When present, active drops that
+      would break group contiguity resolve to `none`. */
+  readonly activeBranchKeyById?: ReadonlyMap<string, string>;
 }): SidebarThreadDropPlan {
   const {
     activeKey,
@@ -254,6 +298,14 @@ export function planSidebarThreadDrop(input: {
         activeSection === "active" &&
         order.length === activeOrder.length &&
         order.every((key, index) => key === activeOrder[index])
+      ) {
+        return { kind: "none" };
+      }
+      // Branch groups stay whole: reject any active drop that would split a
+      // group or interleave two, so drag-sorting only reorders within a group.
+      if (
+        input.activeBranchKeyById &&
+        !activeOrderKeepsBranchGroupsContiguous(order, input.activeBranchKeyById)
       ) {
         return { kind: "none" };
       }

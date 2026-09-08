@@ -17,7 +17,10 @@ import {
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
-import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  groupActiveThreadsByBranch,
+  resolveSettledThreadTimestamp,
+} from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   parseScopedThreadKey,
@@ -139,6 +142,7 @@ import {
   applySidebarThreadDrop,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  countThreadsWithRunningTerminals,
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
@@ -150,14 +154,18 @@ import {
   planSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
+  resolveSidebarBranchStatusSummary,
   resolveSidebarDropTarget,
   resolveSidebarDropVerb,
+  type SidebarBranchStatus,
+  type SidebarBranchStatusCount,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
   shouldCreateNewThreadInCurrentProject,
   shouldRecedeSidebarThread,
   resolveWorkingStartedAt,
+  sidebarBranchHeaderId,
   sidebarListItemId,
   sidebarMarkerId,
   sortLogicalProjectsForSidebar,
@@ -201,7 +209,7 @@ import {
   shouldShowInstanceBadge,
   type ProviderInstanceEntry,
 } from "../providerInstances";
-import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -235,6 +243,83 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
+const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
+const expandedBranchGroupsSchema = Schema.Array(Schema.String);
+
+// Branch group key: same shape client-runtime's grouping uses internally, so a
+// header id and the drag contiguity map agree on what "one group" is. Branchless
+// threads get a per-thread key and never merge into a shared group.
+function branchGroupKeyOf(thread: {
+  readonly id: string;
+  readonly environmentId?: string | undefined;
+  readonly projectId?: string | undefined;
+  readonly branch?: string | null | undefined;
+}): string {
+  return thread.branch == null
+    ? `thread:${thread.environmentId ?? ""}:${thread.id}`
+    : `branch:${thread.environmentId ?? ""}:${thread.projectId ?? ""}:${thread.branch}`;
+}
+
+const BRANCH_STATUS_PRESENTATION: Record<
+  SidebarBranchStatus,
+  { readonly description: string; readonly dotClassName: string }
+> = {
+  approval: { description: "awaiting approval", dotClassName: "bg-amber-500 dark:bg-amber-300" },
+  input: { description: "awaiting input", dotClassName: "bg-indigo-500 dark:bg-indigo-300" },
+  failed: { description: "failed", dotClassName: "bg-red-600 dark:bg-red-300" },
+  active: { description: "active", dotClassName: "bg-sky-500 dark:bg-sky-300" },
+};
+
+function branchStatusSummaryLabel(summary: ReadonlyArray<SidebarBranchStatusCount>): string {
+  return summary
+    .map(({ status, count }) => {
+      const description = BRANCH_STATUS_PRESENTATION[status].description;
+      return `${count} thread${count === 1 ? "" : "s"} ${description}`;
+    })
+    .join(", ");
+}
+
+function branchTerminalSummaryLabel(count: number): string | null {
+  if (count === 0) return null;
+  return `${count} thread${count === 1 ? "" : "s"} with a terminal process running`;
+}
+
+function SidebarBranchStatusSummary({
+  summary,
+}: {
+  readonly summary: ReadonlyArray<SidebarBranchStatusCount>;
+}) {
+  if (summary.length === 0) return null;
+  return (
+    <span
+      aria-hidden
+      className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+    >
+      {summary.map(({ status, count }) => (
+        <span key={status} className="inline-flex items-center gap-1">
+          <span
+            className={cn("size-1.5 rounded-full", BRANCH_STATUS_PRESENTATION[status].dotClassName)}
+          />
+          {count}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function SidebarBranchTerminalSummary({ count }: { readonly count: number }) {
+  if (count === 0) return null;
+  return (
+    <span
+      aria-hidden
+      data-testid="sidebar-branch-terminal-summary"
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-teal-600 dark:text-teal-300/90"
+    >
+      <TerminalIcon className="size-3" />
+      {count}
+    </span>
+  );
+}
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -547,6 +632,110 @@ function SortableSidebarMarker(props: {
         transform: CSS.Translate.toString(transform),
         // A newly revealed target must not slide from its hidden position.
         transition: props.marker.endsWith("-placeholder") ? "none" : transition,
+        visibility: transform?.scaleY === 0 ? "hidden" : undefined,
+      }}
+    >
+      {props.children}
+    </li>
+  );
+}
+
+// A collapsible header for a run of active threads that share a git branch.
+// Draggable:false — it rides the reflow with the other structural markers and
+// is never a drop target. Toggling folds the group down to its lead row.
+function SidebarBranchGroupHeader({
+  groupKey,
+  groupThreads,
+  groupExpanded,
+  branchLabel,
+  projectLabel,
+  branchContextLabel,
+  onToggleExpanded,
+}: {
+  readonly groupKey: string;
+  readonly groupThreads: ReadonlyArray<EnvironmentThreadShell>;
+  readonly groupExpanded: boolean;
+  readonly branchLabel: string;
+  readonly projectLabel: string | null;
+  readonly branchContextLabel: string;
+  readonly onToggleExpanded: (groupKey: string, expanded: boolean) => void;
+}) {
+  const statusSummary = resolveSidebarBranchStatusSummary(groupThreads);
+  const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
+  const sessions = useKnownTerminalSessions({
+    environmentId: groupThreads[0]?.environmentId ?? null,
+    threadId: null,
+  });
+  const terminalThreadCount = countThreadsWithRunningTerminals(groupThreads, sessions);
+  const terminalSummaryLabel = branchTerminalSummaryLabel(terminalThreadCount);
+  const detailsLabel = [statusSummaryLabel, terminalSummaryLabel].filter(Boolean).join(". ");
+  const tooltipDetails = [statusSummaryLabel, terminalSummaryLabel].filter(Boolean).join(" · ");
+  const groupSize = groupThreads.length;
+
+  return (
+    <div className="px-1.5">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${detailsLabel ? `. ${detailsLabel}` : ""}`}
+              aria-expanded={groupExpanded}
+              onClick={() => onToggleExpanded(groupKey, !groupExpanded)}
+              className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+            />
+          }
+        >
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out",
+              groupExpanded && "rotate-0",
+            )}
+          />
+          <GitBranchIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-sidebar-muted-foreground/55"
+          />
+          <span className="min-w-0 truncate">{branchLabel}</span>
+          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/70">
+            {groupSize}
+          </span>
+          <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
+          {statusSummary.length > 0 || terminalThreadCount > 0 ? (
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">
+              <SidebarBranchStatusSummary summary={statusSummary} />
+              <SidebarBranchTerminalSummary count={terminalThreadCount} />
+            </span>
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          <span className="font-medium">{branchContextLabel}</span>
+          {tooltipDetails ? (
+            <span className="text-muted-foreground"> · {tooltipDetails}</span>
+          ) : null}
+        </TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}
+
+// The branch header takes part in the sortable list like the section markers:
+// it shifts with the rows and cannot be picked up.
+function SortableSidebarBranchHeader(props: { groupKey: string; children: ReactNode }) {
+  const { setNodeRef, transform, transition } = useSortable({
+    id: sidebarBranchHeaderId(props.groupKey),
+    disabled: { draggable: true },
+    animateLayoutChanges: animateSidebarLayoutChanges,
+  });
+  return (
+    <li
+      ref={setNodeRef}
+      data-thread-selection-safe
+      className="mt-1.5 list-none"
+      style={{
+        transform: CSS.Translate.toString(transform),
+        transition,
         visibility: transform?.scaleY === 0 ? "hidden" : undefined,
       }}
     >
@@ -2668,6 +2857,27 @@ export default function Sidebar() {
     () => setSettledShelfExpanded((value) => !value),
     [setSettledShelfExpanded],
   );
+  const [expandedBranchGroups, setExpandedBranchGroups] = useLocalStorage(
+    EXPANDED_BRANCH_GROUPS_KEY,
+    [] as string[],
+    expandedBranchGroupsSchema,
+  );
+  const expandedBranchGroupKeys = useMemo(
+    () => new Set(expandedBranchGroups),
+    [expandedBranchGroups],
+  );
+  const setBranchGroupExpanded = useCallback(
+    (groupKey: string, expanded: boolean) => {
+      setExpandedBranchGroups((current) =>
+        expanded
+          ? current.includes(groupKey)
+            ? current
+            : [...current, groupKey]
+          : current.filter((candidate) => candidate !== groupKey),
+      );
+    },
+    [setExpandedBranchGroups],
+  );
   const renderedSettledThreads = useMemo(() => {
     if (settledShelfExpanded) return visibleSettledThreads;
     if (routeThreadKey === null) return [];
@@ -3259,9 +3469,30 @@ export default function Sidebar() {
     const pinnedRows = rowsOf(pinnedThreads, "pinned");
     items.push(...pinnedRows);
     items.push({ kind: "marker", marker: "pinned-divider" });
-    const activeRows = rowsOf(activeThreads, "active");
     items.push({ kind: "marker", marker: "active-placeholder" });
-    items.push(...activeRows);
+    // Active rows group by branch. A multi-thread branch group gets a
+    // collapsible header; singletons and branchless threads stay plain rows.
+    for (const group of groupActiveThreadsByBranch(activeThreads)) {
+      const first = group.threads[0];
+      if (first === undefined) continue;
+      if (group.branch === null || group.threads.length === 1) {
+        items.push(...rowsOf(group.threads, "active"));
+        continue;
+      }
+      const groupKey = branchGroupKeyOf(first);
+      items.push({ kind: "branch-header", groupKey });
+      const expanded = expandedBranchGroupKeys.has(groupKey);
+      const visibleThreads = expanded
+        ? group.threads
+        : group.threads.filter(
+            (thread, index) =>
+              // Collapsed: lead row plus the open thread, so a deep-linked row
+              // never hides behind its own header.
+              index === 0 ||
+              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
+          );
+      items.push(...rowsOf(visibleThreads, "active"));
+    }
     if (snoozedThreads.length > 0) {
       items.push({ kind: "marker", marker: "snoozed-header" });
       items.push(...rowsOf(visibleSnoozedThreads, "snoozed"));
@@ -3273,12 +3504,43 @@ export default function Sidebar() {
     return items;
   }, [
     activeThreads,
+    expandedBranchGroupKeys,
     pinnedThreads,
     renderedSettledThreads,
+    routeThreadKey,
     settledThreads.length,
     snoozedThreads.length,
     visibleSnoozedThreads,
   ]);
+  // Branch-group maps: `activeBranchKeyById` keys every active thread to its
+  // group (singletons get a unique key) so a drop that would split a group is
+  // rejected; `activeBranchHeaderByKey` covers only headered groups so the drag
+  // preview can re-emit their headers.
+  const { activeBranchKeyById, activeBranchHeaderByKey, branchGroupByKey } = useMemo(() => {
+    const branchKey = new Map<string, string>();
+    const headerKey = new Map<string, string>();
+    const byKey = new Map<
+      string,
+      { readonly branch: string; readonly threads: ReadonlyArray<EnvironmentThreadShell> }
+    >();
+    for (const group of groupActiveThreadsByBranch(activeThreads)) {
+      const first = group.threads[0];
+      if (first === undefined) continue;
+      const groupKey = branchGroupKeyOf(first);
+      const hasHeader = group.branch !== null && group.threads.length > 1;
+      if (hasHeader) byKey.set(groupKey, { branch: group.branch!, threads: group.threads });
+      for (const thread of group.threads) {
+        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        branchKey.set(key, groupKey);
+        if (hasHeader) headerKey.set(key, groupKey);
+      }
+    }
+    return {
+      activeBranchKeyById: branchKey,
+      activeBranchHeaderByKey: headerKey,
+      branchGroupByKey: byKey,
+    };
+  }, [activeThreads]);
   useEffect(() => {
     if (
       dragState !== null &&
@@ -3331,8 +3593,10 @@ export default function Sidebar() {
         settledVisibleCount,
         routeThreadKey,
         snoozedThreadCount: snoozedThreads.length,
+        activeBranchHeaderByKey,
       }),
     [
+      activeBranchHeaderByKey,
       draggedSettledOrder,
       routeThreadKey,
       settledShelfExpanded,
@@ -3388,6 +3652,7 @@ export default function Sidebar() {
             activeOrder: activeKeys,
             activeKeysById,
             activeReorderableKeys: activeReorderableThreadKeys,
+            activeBranchKeyById,
           }).kind !== "none"
         );
       },
@@ -3397,6 +3662,7 @@ export default function Sidebar() {
       },
     );
   }, [
+    activeBranchKeyById,
     activeKeysById,
     pinnedKeysById,
     serverConfigs,
@@ -3436,6 +3702,7 @@ export default function Sidebar() {
         activeOrder: activeKeys,
         activeKeysById,
         activeReorderableKeys: activeReorderableThreadKeys,
+        activeBranchKeyById,
       });
       if (plan.kind === "none") return;
       if (plan.kind === "settle" && settlingThreadKeysRef.current.has(activeKey)) return;
@@ -3541,6 +3808,7 @@ export default function Sidebar() {
       })();
     },
     [
+      activeBranchKeyById,
       activeKeysById,
       pinnedKeysById,
       serverConfigs,
@@ -4769,6 +5037,36 @@ export default function Sidebar() {
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          continue;
+                        }
+                        if (item.kind === "branch-header") {
+                          const group = branchGroupByKey.get(item.groupKey);
+                          if (group === undefined) continue;
+                          const lead = group.threads[0];
+                          const projectLabel =
+                            (lead &&
+                              projectDisplayNameByKey.get(
+                                `${lead.environmentId}:${lead.projectId}`,
+                              )) ??
+                            null;
+                          items.push(
+                            <SortableSidebarBranchHeader
+                              key={item.groupKey}
+                              groupKey={item.groupKey}
+                            >
+                              <SidebarBranchGroupHeader
+                                groupKey={item.groupKey}
+                                groupThreads={group.threads}
+                                groupExpanded={expandedBranchGroupKeys.has(item.groupKey)}
+                                branchLabel={group.branch}
+                                projectLabel={projectLabel}
+                                branchContextLabel={
+                                  projectLabel ? `${projectLabel} · ${group.branch}` : group.branch
+                                }
+                                onToggleExpanded={setBranchGroupExpanded}
+                              />
+                            </SortableSidebarBranchHeader>,
+                          );
                           continue;
                         }
                         switch (item.marker) {

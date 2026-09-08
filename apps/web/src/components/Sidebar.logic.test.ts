@@ -3,6 +3,7 @@ import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import {
+  activeOrderKeepsBranchGroupsContiguous,
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
   archiveSelectedThreadEntries,
@@ -1297,6 +1298,33 @@ describe("resolveSidebarDropTarget", () => {
   });
 });
 
+describe("activeOrderKeepsBranchGroupsContiguous", () => {
+  const branchKeyById = new Map<string, string>([
+    ["a1", "gX"],
+    ["a2", "gX"],
+    ["a3", "gY"],
+  ]);
+
+  it("allows reordering within a group", () => {
+    expect(activeOrderKeepsBranchGroupsContiguous(["a2", "a1", "a3"], branchKeyById)).toBe(true);
+  });
+
+  it("rejects an order that splits a group", () => {
+    // a3 (gY) wedged between the two gX rows breaks the block.
+    expect(activeOrderKeepsBranchGroupsContiguous(["a1", "a3", "a2"], branchKeyById)).toBe(false);
+  });
+
+  it("allows relocating a singleton where it splits nothing", () => {
+    expect(activeOrderKeepsBranchGroupsContiguous(["a3", "a1", "a2"], branchKeyById)).toBe(true);
+  });
+
+  it("ignores keys absent from the map (hidden or filtered rows)", () => {
+    expect(activeOrderKeepsBranchGroupsContiguous(["a1", "a2", "hidden"], branchKeyById)).toBe(
+      true,
+    );
+  });
+});
+
 describe("planSidebarThreadDrop", () => {
   const pinnedKeysById = new Map<string, string | null>([
     ["p1", "f"],
@@ -1325,6 +1353,30 @@ describe("planSidebarThreadDrop", () => {
       ...overrides,
       target: { activeOrder: [], ...overrides.target },
     });
+
+  it("keeps branch groups whole: within-group active reorder writes, cross-group is none", () => {
+    const activeBranchKeyById = new Map<string, string>([
+      ["a1", "gX"],
+      ["a2", "gX"],
+      ["a3", "gY"],
+    ]);
+    expect(
+      plan({
+        activeKey: "a1",
+        activeSection: "active",
+        activeBranchKeyById,
+        target: { section: "active", pinnedOrder: [], activeOrder: ["a2", "a1", "a3"] },
+      }).kind,
+    ).toBe("move-active");
+    expect(
+      plan({
+        activeKey: "a3",
+        activeSection: "active",
+        activeBranchKeyById,
+        target: { section: "active", pinnedOrder: [], activeOrder: ["a1", "a3", "a2"] },
+      }),
+    ).toEqual({ kind: "none" });
+  });
 
   it("allows old-server pinned reordering while rejecting settlement", () => {
     expect(

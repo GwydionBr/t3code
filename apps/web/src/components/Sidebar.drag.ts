@@ -106,6 +106,9 @@ export function createSidebarSortingStrategy(input: {
   /** Space each pinned boundary opens for its label while dragging. The
    * markers stay zero height at rest, so nothing is reserved until pickup. */
   boundaryLabelHeight?: number;
+  /** Active thread key → branch group key, only for threads under a group
+   * header. Lets the preview re-emit headers so they don't blink out mid-drag. */
+  activeBranchHeaderByKey?: ReadonlyMap<string, string>;
 }): SortingStrategy {
   const { items } = input;
   const indices = new Map(items.map((item, index) => [sidebarListItemId(item), index]));
@@ -135,6 +138,8 @@ export function createSidebarSortingStrategy(input: {
         }
         continue;
       }
+      // Branch-group headers carry no section and no thread key.
+      if (item.kind === "branch-header") continue;
       if (item.section === "pinned" || item.section === "active")
         cardHeight ??= rects[index]?.height;
       else slimHeight ??= rects[index]?.height;
@@ -179,7 +184,21 @@ export function createSidebarSortingStrategy(input: {
     marker("pinned-header");
     projected.push(...groups.pinned);
     marker("pinned-divider");
-    section("active");
+    // Active rows re-emit their branch-group headers at group boundaries so the
+    // headers ride the reflow instead of blinking to zero height mid-drag.
+    if (groups.active.length > 0) {
+      let lastHeaderGroup: string | undefined;
+      for (const item of groups.active) {
+        const headerGroup = input.activeBranchHeaderByKey?.get(item.key);
+        if (headerGroup !== undefined && headerGroup !== lastHeaderGroup) {
+          projected.push({ kind: "branch-header", groupKey: headerGroup });
+        }
+        lastHeaderGroup = headerGroup;
+        projected.push(item);
+      }
+    } else {
+      marker("active-placeholder");
+    }
     if (
       groups.snoozed.length > 0 ||
       ((active.section !== "snoozed" || (input.snoozedThreadCount ?? 0) > 1) &&
