@@ -8,6 +8,7 @@ import {
 } from "./Sidebar.drag";
 import {
   resolveSidebarDropTarget,
+  sidebarBranchHeaderId,
   sidebarListItemId,
   sidebarMarkerId,
   type SidebarListItem,
@@ -38,9 +39,11 @@ function layout(
     const height =
       item.kind === "thread"
         ? (item.section === "pinned" || item.section === "active" ? cardHeight : 36) * scale
-        : item.marker === "pinned-header" || item.marker === "pinned-divider"
-          ? 0
-          : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
+        : item.kind === "branch-header"
+          ? 28 * scale
+          : item.marker === "pinned-header" || item.marker === "pinned-divider"
+            ? 0
+            : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
     const rect = { top, height, bottom: top + height, left: 0, right: 260, width: 260 };
     top += height + 1;
     return rect;
@@ -802,5 +805,49 @@ describe("lifted card clearance", () => {
   it("follows the list when it scrolls and includes content preceding Pins", () => {
     expect(511 + apply(511, 36, -500, 96).y).toBe(128);
     expect(511 + apply(511, 36, -500, 136, 114).y).toBe(250);
+  });
+});
+
+describe("branch group headers in the sorting preview", () => {
+  const groupKey = "branch:env:proj:main";
+  const items: SidebarListItem[] = [
+    pinnedHeader,
+    divider,
+    { kind: "branch-header", groupKey },
+    thread("a1", "active"),
+    thread("a2", "active"),
+    settledHeader,
+  ];
+
+  it("keeps the branch header visible during an in-group active drag", () => {
+    const result = preview(
+      {
+        items,
+        settledOrder: [],
+        settledExpanded: true,
+        activeBranchHeaderByKey: new Map([
+          ["a1", groupKey],
+          ["a2", groupKey],
+        ]),
+      },
+      "a1",
+      "a2",
+    );
+    // A re-emitted header projects to a real slot, never the zero-scaleY hide.
+    expect(result.get(sidebarBranchHeaderId(groupKey))?.scaleY).toBe(1);
+  });
+
+  it("reflows with the default strategy while the header itself is dragged", () => {
+    // The block-move projection is not modelled here, so a header drag must
+    // fall back to the default vertical reflow rather than freezing every row.
+    const strategy = createSidebarSortingStrategy({
+      items,
+      settledOrder: [],
+      settledExpanded: true,
+    });
+    const args = layout(items, sidebarBranchHeaderId(groupKey), "a2");
+    for (let index = 0; index < items.length; index += 1) {
+      expect(strategy({ ...args, index })).toEqual(verticalListSortingStrategy({ ...args, index }));
+    }
   });
 });

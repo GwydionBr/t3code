@@ -122,6 +122,20 @@ export interface ActiveThreadBranchGroup<T> {
   readonly threads: T[];
 }
 
+/** Stable identity shared by branch grouping and every client-side affordance
+    that needs to refer to the same group. Branchless threads deliberately get
+    a per-thread identity instead of forming one synthetic group. */
+export function activeThreadBranchGroupKey(thread: {
+  readonly id: string;
+  readonly environmentId?: string | undefined;
+  readonly projectId?: string | undefined;
+  readonly branch?: string | null | undefined;
+}): string {
+  return thread.branch == null
+    ? `thread:${thread.environmentId ?? ""}:${thread.id}`
+    : `branch:${thread.environmentId ?? ""}:${thread.projectId ?? ""}:${thread.branch}`;
+}
+
 /** Keeps active threads from the same workspace branch together. Groups are
     ordered by their first thread in the persisted active order; rows inside
     a group retain that order. New and reopened threads still lead keyed rows.
@@ -142,10 +156,7 @@ export function groupActiveThreadsByBranch<
   const groups = new Map<string, ActiveThreadBranchGroup<T>>();
 
   for (const thread of ordered) {
-    const key =
-      thread.branch == null
-        ? `thread:${thread.environmentId ?? ""}:${thread.id}`
-        : `branch:${thread.environmentId ?? ""}:${thread.projectId ?? ""}:${thread.branch}`;
+    const key = activeThreadBranchGroupKey(thread);
     const group = groups.get(key);
     if (group) group.threads.push(thread);
     else groups.set(key, { branch: thread.branch ?? null, threads: [thread] });
@@ -322,6 +333,77 @@ export function planPinnedReorder(input: {
     const key = keys[index]!;
     return keysById.get(id) === key ? [] : [{ id, orderKey: key }];
   });
+}
+
+/** `count` order keys that sort strictly between `before` and `after`, evenly
+    spread by recursive bisection. Null bounds are the open ends of the run.
+    Returns null when the gap cannot hold that many keys (corrupt or adjacent
+    bounds), so callers fall back to rewriting the section. */
+export function spreadPinOrderKeysBetween(
+  before: string | null,
+  after: string | null,
+  count: number,
+): string[] | null {
+  if (count <= 0) return [];
+  const mid = pinOrderKeyBetween(before, after);
+  if (mid === null) return null;
+  const leftCount = Math.floor((count - 1) / 2);
+  const left = spreadPinOrderKeysBetween(before, mid, leftCount);
+  if (left === null) return null;
+  const right = spreadPinOrderKeysBetween(mid, after, count - 1 - leftCount);
+  if (right === null) return null;
+  return [...left, mid, ...right];
+}
+
+/**
+ * planPinnedReorder for a whole contiguous block: assigns keys to `movedIds`
+ * (in order) so the block lands between its new neighbors in `orderedIds`,
+ * keeping the group a single run. Moving a branch group rewrites every
+ * member's key — small groups, so the extra writes are accepted (ADR 0001).
+ * Falls back to materializing the whole section with fresh spread keys when a
+ * neighbor is keyless or the gap is too tight, exactly like planPinnedReorder.
+ */
+export function planContiguousBlockReorder(input: {
+  /** Thread ids in the desired visual order (after the block move). */
+  readonly orderedIds: readonly string[];
+  /** Include retained keys from hidden rows; only orderedIds receive writes. */
+  readonly keysById: ReadonlyMap<string, string | null | undefined>;
+  /** The moved block, in desired order; must be contiguous in orderedIds. */
+  readonly movedIds: readonly string[];
+}): ReadonlyArray<{ readonly id: string; readonly orderKey: string }> {
+  const { orderedIds, keysById, movedIds } = input;
+  if (movedIds.length === 0) return [];
+  const movedSet = new Set(movedIds);
+  const startIndex = orderedIds.findIndex((id) => movedSet.has(id));
+  const visibleIds = new Set(orderedIds);
+  const reservedKeys = new Set(
+    [...keysById].flatMap(([id, key]) => (!visibleIds.has(id) && key != null ? [key] : [])),
+  );
+  // The block must be a single contiguous run starting at startIndex; if the
+  // caller handed us a broken order, materializing the section is the safe fix.
+  const contiguous =
+    startIndex !== -1 && movedIds.every((id, offset) => orderedIds[startIndex + offset] === id);
+  if (contiguous) {
+    const beforeId = startIndex > 0 ? orderedIds[startIndex - 1] : null;
+    const afterId = orderedIds[startIndex + movedIds.length] ?? null;
+    const beforeKey = beforeId != null ? (keysById.get(beforeId) ?? null) : null;
+    const afterKey = afterId != null ? (keysById.get(afterId) ?? null) : null;
+    if ((beforeId === null || beforeKey != null) && (afterId === null || afterKey != null)) {
+      const keys = spreadPinOrderKeysBetween(beforeKey, afterKey, movedIds.length);
+      if (keys !== null && keys.every((key) => !reservedKeys.has(key))) {
+        return movedIds.flatMap((id, index) =>
+          keysById.get(id) === keys[index] ? [] : [{ id, orderKey: keys[index]! }],
+        );
+      }
+    }
+  }
+  // Keyless neighbor, tight gap, or non-contiguous input: rewrite the section.
+  const keys = generateSpreadPinOrderKeys(orderedIds.length + reservedKeys.size)
+    .filter((key) => !reservedKeys.has(key))
+    .slice(0, orderedIds.length);
+  return orderedIds.flatMap((id, index) =>
+    keysById.get(id) === keys[index] ? [] : [{ id, orderKey: keys[index]! }],
+  );
 }
 
 /**

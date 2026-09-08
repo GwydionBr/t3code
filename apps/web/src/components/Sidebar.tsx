@@ -4,6 +4,7 @@ import {
   DndContext,
   useSensor,
   useSensors,
+  type DraggableSyntheticListeners,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -17,7 +18,11 @@ import {
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
-import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  activeThreadBranchGroupKey,
+  groupActiveThreadsByBranch,
+  resolveSettledThreadTimestamp,
+} from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   parseScopedThreadKey,
@@ -137,9 +142,12 @@ import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
+  buildSidebarGroupDropOperations,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  countThreadsWithRunningTerminals,
   deleteSelectedThreadEntries,
+  executeSidebarGroupDropOperations,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -147,17 +155,25 @@ import {
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
+  parseSidebarBranchHeaderId,
+  planSidebarGroupDrop,
   planSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
+  resolveEffectiveExpandedBranchGroups,
+  resolveSidebarBranchStatusSummary,
   resolveSidebarDropTarget,
+  resolveSidebarGroupDropTarget,
   resolveSidebarDropVerb,
+  type SidebarBranchStatus,
+  type SidebarBranchStatusCount,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
   shouldCreateNewThreadInCurrentProject,
   shouldRecedeSidebarThread,
   resolveWorkingStartedAt,
+  sidebarBranchHeaderId,
   sidebarListItemId,
   sidebarMarkerId,
   sortLogicalProjectsForSidebar,
@@ -167,6 +183,7 @@ import {
   useRetainedValue,
   useSidebarRowSubscriptionLease,
   useThreadJumpHintVisibility,
+  type SidebarGroupDropPlan,
   type SidebarListItem,
   type SidebarListMarker,
   type SidebarSection,
@@ -201,7 +218,7 @@ import {
   shouldShowInstanceBadge,
   type ProviderInstanceEntry,
 } from "../providerInstances";
-import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -235,6 +252,70 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
+const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
+const expandedBranchGroupsSchema = Schema.Array(Schema.String);
+const DEFAULT_EXPANDED_BRANCH_GROUPS: string[] = [];
+
+const BRANCH_STATUS_PRESENTATION: Record<
+  SidebarBranchStatus,
+  { readonly description: string; readonly dotClassName: string }
+> = {
+  approval: { description: "awaiting approval", dotClassName: "bg-amber-500 dark:bg-amber-300" },
+  input: { description: "awaiting input", dotClassName: "bg-indigo-500 dark:bg-indigo-300" },
+  failed: { description: "failed", dotClassName: "bg-red-600 dark:bg-red-300" },
+  active: { description: "active", dotClassName: "bg-sky-500 dark:bg-sky-300" },
+};
+
+function branchStatusSummaryLabel(summary: ReadonlyArray<SidebarBranchStatusCount>): string {
+  return summary
+    .map(({ status, count }) => {
+      const description = BRANCH_STATUS_PRESENTATION[status].description;
+      return `${count} thread${count === 1 ? "" : "s"} ${description}`;
+    })
+    .join(", ");
+}
+
+function branchTerminalSummaryLabel(count: number): string | null {
+  if (count === 0) return null;
+  return `${count} thread${count === 1 ? "" : "s"} with a terminal process running`;
+}
+
+function SidebarBranchStatusSummary({
+  summary,
+}: {
+  readonly summary: ReadonlyArray<SidebarBranchStatusCount>;
+}) {
+  if (summary.length === 0) return null;
+  return (
+    <span
+      aria-hidden
+      className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+    >
+      {summary.map(({ status, count }) => (
+        <span key={status} className="inline-flex items-center gap-1">
+          <span
+            className={cn("size-1.5 rounded-full", BRANCH_STATUS_PRESENTATION[status].dotClassName)}
+          />
+          {count}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function SidebarBranchTerminalSummary({ count }: { readonly count: number }) {
+  if (count === 0) return null;
+  return (
+    <span
+      aria-hidden
+      data-testid="sidebar-branch-terminal-summary"
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-teal-600 dark:text-teal-300/90"
+    >
+      <TerminalIcon className="size-3" />
+      {count}
+    </span>
+  );
+}
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -551,6 +632,128 @@ function SortableSidebarMarker(props: {
       }}
     >
       {props.children}
+    </li>
+  );
+}
+
+// A collapsible header for a run of active threads that share a git branch.
+// The header itself is the group's drag handle (ADR 0001): the drag listeners
+// live on its button, so pressing-and-moving lifts the whole block while a
+// plain click still toggles the group (the pointer sensor's distance
+// threshold separates the two, exactly like a thread row).
+function SidebarBranchGroupHeader({
+  groupKey,
+  groupThreads,
+  groupExpanded,
+  branchLabel,
+  projectLabel,
+  branchContextLabel,
+  onToggleExpanded,
+  dragListeners,
+}: {
+  readonly groupKey: string;
+  readonly groupThreads: ReadonlyArray<EnvironmentThreadShell>;
+  readonly groupExpanded: boolean;
+  readonly branchLabel: string;
+  readonly projectLabel: string | null;
+  readonly branchContextLabel: string;
+  readonly onToggleExpanded: (groupKey: string, expanded: boolean) => void;
+  /** dnd-kit activator listeners, or undefined when the group cannot be
+      dragged (e.g. a server without active reordering). */
+  readonly dragListeners: DraggableSyntheticListeners;
+}) {
+  const statusSummary = resolveSidebarBranchStatusSummary(groupThreads);
+  const statusSummaryLabel = branchStatusSummaryLabel(statusSummary);
+  const sessions = useKnownTerminalSessions({
+    environmentId: groupThreads[0]?.environmentId ?? null,
+    threadId: null,
+  });
+  const terminalThreadCount = countThreadsWithRunningTerminals(groupThreads, sessions);
+  const terminalSummaryLabel = branchTerminalSummaryLabel(terminalThreadCount);
+  const detailsLabel = [statusSummaryLabel, terminalSummaryLabel].filter(Boolean).join(". ");
+  const tooltipDetails = [statusSummaryLabel, terminalSummaryLabel].filter(Boolean).join(" · ");
+  const groupSize = groupThreads.length;
+
+  return (
+    <div className="px-1.5">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label={`${groupExpanded ? "Collapse" : "Expand"} ${groupSize} threads on branch ${branchLabel}${projectLabel ? ` in ${projectLabel}` : ""}${detailsLabel ? `. ${detailsLabel}` : ""}`}
+              aria-expanded={groupExpanded}
+              onClick={() => onToggleExpanded(groupKey, !groupExpanded)}
+              // touch-action:none lets the pointer sensor own vertical drags on
+              // touch without the page scrolling away from under the gesture.
+              style={dragListeners ? { touchAction: "none" } : undefined}
+              {...dragListeners}
+              className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+            />
+          }
+        >
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              "size-3 shrink-0 -rotate-90 motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out",
+              groupExpanded && "rotate-0",
+            )}
+          />
+          <GitBranchIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-sidebar-muted-foreground/55"
+          />
+          <span className="min-w-0 truncate">{branchLabel}</span>
+          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/70">
+            {groupSize}
+          </span>
+          <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
+          {statusSummary.length > 0 || terminalThreadCount > 0 ? (
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">
+              <SidebarBranchStatusSummary summary={statusSummary} />
+              <SidebarBranchTerminalSummary count={terminalThreadCount} />
+            </span>
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          <span className="font-medium">{branchContextLabel}</span>
+          {tooltipDetails ? (
+            <span className="text-muted-foreground"> · {tooltipDetails}</span>
+          ) : null}
+        </TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}
+
+// The branch header is the drag handle for the whole group (ADR 0001): picking
+// it up moves every member as one block. The li owns the sortable node and its
+// reflow transform; the activator listeners are handed to the header's button
+// (via the render child) so the press lands on the element the user actually
+// touches. Disabled while a drop is settling or the group cannot reorder.
+function SortableSidebarBranchHeader(props: {
+  groupKey: string;
+  disabled: boolean;
+  children: (dragListeners: DraggableSyntheticListeners) => ReactNode;
+}) {
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: sidebarBranchHeaderId(props.groupKey),
+    disabled: { draggable: props.disabled },
+    animateLayoutChanges: animateSidebarLayoutChanges,
+  });
+  return (
+    <li
+      ref={setNodeRef}
+      data-thread-selection-safe
+      className="mt-1.5 list-none"
+      style={{
+        transform: CSS.Translate.toString(transform),
+        transition,
+        visibility: transform?.scaleY === 0 ? "hidden" : undefined,
+        ...(isDragging ? { position: "relative", zIndex: 1 } : null),
+      }}
+    >
+      {props.children(listeners)}
     </li>
   );
 }
@@ -2466,6 +2669,9 @@ export default function Sidebar() {
     readonly section: "pinned" | "active" | "settled";
     readonly occurredAt: string;
     readonly clearsSnooze: boolean;
+    /** Every thread the drop projects into `section`. Defaults to `[key]`; a
+        whole-group move carries all its members so they all land at once. */
+    readonly memberKeys?: readonly string[];
     /** Full destination order for pinned and active drops. */
     readonly order: readonly string[] | null;
     /** Destination order keys before the drop, to recognize concurrent writes. */
@@ -2489,6 +2695,11 @@ export default function Sidebar() {
     // memo exactly at the next wake boundary.
     void snoozeWakeTick;
     const preciseNow = new Date().toISOString();
+    // A single-thread drop projects just its row; a group move projects every
+    // member into the destination at once (all share the drop's section).
+    const optimisticMemberKeys = new Set(
+      optimisticDrop === null ? [] : (optimisticDrop.memberKeys ?? [optimisticDrop.key]),
+    );
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
@@ -2516,7 +2727,7 @@ export default function Sidebar() {
       if (capabilities?.threadPinning === true && capabilities.threadPinReorder === true) {
         draggable.add(threadKey);
       }
-      if (optimisticDrop?.key === threadKey) {
+      if (optimisticDrop !== null && optimisticMemberKeys.has(threadKey)) {
         const projected = applySidebarThreadDrop(
           thread,
           optimisticDrop.section,
@@ -2667,6 +2878,85 @@ export default function Sidebar() {
   const toggleSettledShelf = useCallback(
     () => setSettledShelfExpanded((value) => !value),
     [setSettledShelfExpanded],
+  );
+  // Branch-group maps: `activeBranchKeyById` keys every active thread to its
+  // group (singletons get a unique key) so a drop that would split a group is
+  // rejected; `activeBranchHeaderByKey` covers only headered groups so the drag
+  // preview can re-emit their headers and the open thread's group auto-expands.
+  const { activeBranchKeyById, activeBranchHeaderByKey, branchGroupByKey } = useMemo(() => {
+    const branchKey = new Map<string, string>();
+    const headerKey = new Map<string, string>();
+    const byKey = new Map<
+      string,
+      { readonly branch: string; readonly threads: ReadonlyArray<EnvironmentThreadShell> }
+    >();
+    for (const group of groupActiveThreadsByBranch(activeThreads)) {
+      const first = group.threads[0];
+      if (first === undefined) continue;
+      const groupKey = activeThreadBranchGroupKey(first);
+      const hasHeader = group.branch !== null && group.threads.length > 1;
+      if (hasHeader) byKey.set(groupKey, { branch: group.branch!, threads: group.threads });
+      for (const thread of group.threads) {
+        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        branchKey.set(key, groupKey);
+        if (hasHeader) headerKey.set(key, groupKey);
+      }
+    }
+    return {
+      activeBranchKeyById: branchKey,
+      activeBranchHeaderByKey: headerKey,
+      branchGroupByKey: byKey,
+    };
+  }, [activeThreads]);
+  const [expandedBranchGroups, setExpandedBranchGroups] = useLocalStorage(
+    EXPANDED_BRANCH_GROUPS_KEY,
+    DEFAULT_EXPANDED_BRANCH_GROUPS,
+    expandedBranchGroupsSchema,
+  );
+  const expandedBranchGroupKeys = useMemo(
+    () => new Set(expandedBranchGroups),
+    [expandedBranchGroups],
+  );
+  // The group holding the open thread, only when it is a headered (>1 thread)
+  // group: that group auto-expands so the active row is never hidden.
+  const activeThreadGroupKey =
+    routeThreadKey !== null ? (activeBranchHeaderByKey.get(routeThreadKey) ?? null) : null;
+  // A manual collapse of the auto-expanded active group wins over the
+  // auto-expand. Ephemeral (never persisted) and keyed to the active group, so
+  // it lapses on its own once the open thread moves to a different group.
+  const [autoExpandSuppressedGroupKey, setAutoExpandSuppressedGroupKey] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    setAutoExpandSuppressedGroupKey((current) =>
+      current === null || current === activeThreadGroupKey ? current : null,
+    );
+  }, [activeThreadGroupKey]);
+  const effectiveExpandedBranchGroupKeys = useMemo(
+    () =>
+      resolveEffectiveExpandedBranchGroups({
+        expandedGroupKeys: expandedBranchGroupKeys,
+        activeThreadGroupKey,
+        autoExpandSuppressedGroupKey,
+      }),
+    [activeThreadGroupKey, autoExpandSuppressedGroupKey, expandedBranchGroupKeys],
+  );
+  const setBranchGroupExpanded = useCallback(
+    (groupKey: string, expanded: boolean) => {
+      setExpandedBranchGroups((current) =>
+        expanded
+          ? current.includes(groupKey)
+            ? current
+            : [...current, groupKey]
+          : current.filter((candidate) => candidate !== groupKey),
+      );
+      // Collapsing the group that the open thread lives in is an explicit
+      // choice that must beat auto-expand; expanding it clears any suppression.
+      if (groupKey === activeThreadGroupKey) {
+        setAutoExpandSuppressedGroupKey(expanded ? null : groupKey);
+      }
+    },
+    [activeThreadGroupKey, setExpandedBranchGroups],
   );
   const renderedSettledThreads = useMemo(() => {
     if (settledShelfExpanded) return visibleSettledThreads;
@@ -3047,6 +3337,9 @@ export default function Sidebar() {
     readonly occurredAt: string;
     readonly activationY: number | null;
     readonly targetSection: SidebarSection | null;
+    /** Set when the lifted item is a branch-group header: the whole block
+        moves as a unit (ADR 0001). Null for an ordinary thread-row drag. */
+    readonly activeGroupKey: string | null;
   } | null>(null);
   const dragTargetSection = dragState?.targetSection ?? null;
   const dragSensorRef = useRef<SidebarPointerSensor | null>(null);
@@ -3110,13 +3403,16 @@ export default function Sidebar() {
       setOptimisticDrop(null);
       return;
     }
-    const canonicalSection = effectiveSnoozed(thread, { now: new Date().toISOString() })
-      ? "snoozed"
-      : thread.settledOverride === "settled"
-        ? "settled"
-        : thread.pinnedAt != null
-          ? "pinned"
-          : "active";
+    const now = new Date().toISOString();
+    const canonicalSectionOf = (candidate: EnvironmentThreadShell): SidebarSection =>
+      effectiveSnoozed(candidate, { now })
+        ? "snoozed"
+        : candidate.settledOverride === "settled"
+          ? "settled"
+          : candidate.pinnedAt != null
+            ? "pinned"
+            : "active";
+    const canonicalSection = canonicalSectionOf(thread);
     if (
       canonicalSection !== optimisticDrop.sourceSection &&
       canonicalSection !== optimisticDrop.section
@@ -3125,12 +3421,24 @@ export default function Sidebar() {
       return;
     }
     if (optimisticDrop.order === null) {
-      // Settle also emits unpin/unsnooze events. Wait for the entire move
-      // before releasing the projected fields and sort timestamps.
+      // A group settle is dispatched member by member. Keep the complete
+      // optimistic block until every member has landed, rather than exposing a
+      // transient half-settled group as soon as the lead thread updates.
+      const memberThreads = (optimisticDrop.memberKeys ?? [optimisticDrop.key]).map((key) =>
+        canonicalByKey.get(key),
+      );
+      if (memberThreads.some((candidate) => candidate === undefined)) {
+        setOptimisticDrop(null);
+        return;
+      }
       if (
-        canonicalSection === optimisticDrop.section &&
-        thread.pinnedAt == null &&
-        (!optimisticDrop.clearsSnooze || thread.snoozedUntil == null)
+        memberThreads.every(
+          (candidate) =>
+            candidate !== undefined &&
+            canonicalSectionOf(candidate) === optimisticDrop.section &&
+            candidate.pinnedAt == null &&
+            (!optimisticDrop.clearsSnooze || candidate.snoozedUntil == null),
+        )
       ) {
         setOptimisticDrop(null);
       }
@@ -3210,7 +3518,9 @@ export default function Sidebar() {
   const handleThreadDragStart = useCallback(
     (event: DragStartEvent) => {
       const activeKey = String(event.active.id);
-      const activeSection = sectionByThreadKey.get(activeKey);
+      // A branch-group header lifts the whole block; grouping is active-only.
+      const activeGroupKey = parseSidebarBranchHeaderId(activeKey);
+      const activeSection = activeGroupKey !== null ? "active" : sectionByThreadKey.get(activeKey);
       if (activeSection === undefined) return;
       // Stop normal section motion before dnd-kit measures the picked-up row.
       listMotionRef.current?.suspend();
@@ -3227,6 +3537,7 @@ export default function Sidebar() {
       setDragState({
         activeKey,
         activeSection,
+        activeGroupKey,
         targetSection: activeSection,
         occurredAt: new Date().toISOString(),
         activationY:
@@ -3259,9 +3570,25 @@ export default function Sidebar() {
     const pinnedRows = rowsOf(pinnedThreads, "pinned");
     items.push(...pinnedRows);
     items.push({ kind: "marker", marker: "pinned-divider" });
-    const activeRows = rowsOf(activeThreads, "active");
     items.push({ kind: "marker", marker: "active-placeholder" });
-    items.push(...activeRows);
+    // Active rows group by branch. A multi-thread branch group gets a
+    // collapsible header; singletons and branchless threads stay plain rows.
+    for (const group of groupActiveThreadsByBranch(activeThreads)) {
+      const first = group.threads[0];
+      if (first === undefined) continue;
+      if (group.branch === null || group.threads.length === 1) {
+        items.push(...rowsOf(group.threads, "active"));
+        continue;
+      }
+      const groupKey = activeThreadBranchGroupKey(first);
+      items.push({ kind: "branch-header", groupKey });
+      // The group holding the open thread auto-expands (see
+      // effectiveExpandedBranchGroupKeys), so a collapsed group is never the
+      // one hiding the deep-linked row — it folds down to its lead row alone.
+      const expanded = effectiveExpandedBranchGroupKeys.has(groupKey);
+      const visibleThreads = expanded ? group.threads : group.threads.slice(0, 1);
+      items.push(...rowsOf(visibleThreads, "active"));
+    }
     if (snoozedThreads.length > 0) {
       items.push({ kind: "marker", marker: "snoozed-header" });
       items.push(...rowsOf(visibleSnoozedThreads, "snoozed"));
@@ -3273,6 +3600,7 @@ export default function Sidebar() {
     return items;
   }, [
     activeThreads,
+    effectiveExpandedBranchGroupKeys,
     pinnedThreads,
     renderedSettledThreads,
     settledThreads.length,
@@ -3280,9 +3608,13 @@ export default function Sidebar() {
     visibleSnoozedThreads,
   ]);
   useEffect(() => {
+    // Cancel a drag whose lifted item left the list (e.g. a thread archived, or
+    // a branch group dissolved, mid-drag). The dragged id is a thread key or a
+    // branch-header id, so match on the sortable id — matching only thread rows
+    // would cancel every group-header drag the instant it started.
     if (
       dragState !== null &&
-      !sidebarListItems.some((item) => item.kind === "thread" && item.key === dragState.activeKey)
+      !sidebarListItems.some((item) => sidebarListItemId(item) === dragState.activeKey)
     ) {
       cancelThreadDrag();
     }
@@ -3297,18 +3629,33 @@ export default function Sidebar() {
       !listMotionPaused && sidebarListItems.length + visibleDraftSessionCount > 0,
     );
   }, [listMotionPaused, routeDraftIdForRows, sidebarListItems, visibleDraftSessionCount]);
+  // A group's member keys in display order. Active groups are contiguous, so
+  // filtering the active order by group key yields the block the header moves.
+  const groupMemberKeysOf = useCallback(
+    (groupKey: string) => activeKeys.filter((key) => activeBranchKeyById.get(key) === groupKey),
+    [activeKeys, activeBranchKeyById],
+  );
   const handleThreadDragOver = useCallback(
     (event: DragOverEvent) => {
-      const target = event.over
-        ? resolveSidebarDropTarget(sidebarListItems, String(event.active.id), String(event.over.id))
-        : null;
+      const activeId = String(event.active.id);
+      const groupKey = parseSidebarBranchHeaderId(activeId);
+      const target = !event.over
+        ? null
+        : groupKey !== null
+          ? resolveSidebarGroupDropTarget(
+              sidebarListItems,
+              groupKey,
+              groupMemberKeysOf(groupKey),
+              String(event.over.id),
+            )
+          : resolveSidebarDropTarget(sidebarListItems, activeId, String(event.over.id));
       setDragState((current) =>
-        current === null || current.activeKey !== String(event.active.id)
+        current === null || current.activeKey !== activeId
           ? current
           : { ...current, targetSection: target?.section ?? null },
       );
     },
-    [sidebarListItems],
+    [groupMemberKeysOf, sidebarListItems],
   );
   const sortableIds = useMemo(() => sidebarListItems.map(sidebarListItemId), [sidebarListItems]);
   const draggedSettledOrder = useMemo(() => {
@@ -3331,8 +3678,10 @@ export default function Sidebar() {
         settledVisibleCount,
         routeThreadKey,
         snoozedThreadCount: snoozedThreads.length,
+        activeBranchHeaderByKey,
       }),
     [
+      activeBranchHeaderByKey,
       draggedSettledOrder,
       routeThreadKey,
       settledShelfExpanded,
@@ -3360,12 +3709,64 @@ export default function Sidebar() {
     }),
     [threads],
   );
+  // One place resolves a branch-group header drop into a plan: both the
+  // mid-drag collision check and the drop handler go through it, so "what a
+  // group drop does" is defined once. Live membership reconciles the frozen
+  // drag against current state (ADR 0001).
+  const buildGroupDropPlan = useCallback(
+    (groupKey: string, overId: string) => {
+      const memberKeys = groupMemberKeysOf(groupKey);
+      const target = resolveSidebarGroupDropTarget(sidebarListItems, groupKey, memberKeys, overId);
+      if (target === null)
+        return { plan: { kind: "none" } as SidebarGroupDropPlan, memberKeys, target: null };
+      const leadThread = threadByKey.get(memberKeys[0] ?? "");
+      const plan = planSidebarGroupDrop({
+        memberKeys,
+        supportsSettlement:
+          leadThread !== undefined &&
+          serverConfigs.get(leadThread.environmentId)?.environment.capabilities.threadSettlement ===
+            true,
+        target,
+        pinnedKeysById,
+        reorderableKeys: draggableThreadKeys,
+        activeOrder: activeKeys,
+        activeKeysById,
+        activeReorderableKeys: activeReorderableThreadKeys,
+        activeBranchKeyById,
+      });
+      return { plan, memberKeys, target };
+    },
+    [
+      activeBranchKeyById,
+      activeKeys,
+      activeKeysById,
+      activeReorderableThreadKeys,
+      draggableThreadKeys,
+      groupMemberKeysOf,
+      pinnedKeysById,
+      serverConfigs,
+      sidebarListItems,
+      threadByKey,
+    ],
+  );
   const draggedThreadKey = dragState?.activeKey;
   const draggedFromSection = dragState?.activeSection;
+  const draggedGroupKey = dragState?.activeGroupKey ?? null;
   const dragActivationY = dragState?.activationY;
   const dndCollisionDetection = useMemo(() => {
     if (draggedThreadKey === undefined || draggedFromSection === undefined)
       return createSidebarCollisionDetection(() => true);
+    // A branch-group header drag: only offer targets where the whole block can
+    // legally land, so illegal drops show no indicator mid-drag (ADR 0001).
+    if (draggedGroupKey !== null) {
+      return createSidebarCollisionDetection(
+        (id) => buildGroupDropPlan(draggedGroupKey, id).plan.kind !== "none",
+        {
+          items: sidebarListItems,
+          activationY: dragActivationY ?? null,
+        },
+      );
+    }
     const source = threadByKey.get(draggedThreadKey);
     if (source === undefined) return createSidebarCollisionDetection(() => false);
     return createSidebarCollisionDetection(
@@ -3388,6 +3789,7 @@ export default function Sidebar() {
             activeOrder: activeKeys,
             activeKeysById,
             activeReorderableKeys: activeReorderableThreadKeys,
+            activeBranchKeyById,
           }).kind !== "none"
         );
       },
@@ -3397,13 +3799,16 @@ export default function Sidebar() {
       },
     );
   }, [
+    activeBranchKeyById,
     activeKeysById,
+    buildGroupDropPlan,
     pinnedKeysById,
     serverConfigs,
     activeKeys,
     activeReorderableThreadKeys,
     draggedThreadKey,
     draggedFromSection,
+    draggedGroupKey,
     dragActivationY,
     draggableThreadKeys,
     pinnedKeys,
@@ -3413,6 +3818,102 @@ export default function Sidebar() {
   const handleThreadDragEnd = useCallback(
     (event: DragEndEvent) => {
       const activeKey = String(event.active.id);
+      // A branch-group header drag moves the whole block as one unit.
+      const draggedGroupKey = parseSidebarBranchHeaderId(activeKey);
+      if (draggedGroupKey !== null) {
+        const overId = event.over === null ? null : String(event.over.id);
+        if (overId === null) return;
+        // Same resolver the collision check used; live membership reconciles
+        // the frozen drag against current state (a member settled/closed
+        // mid-drag drops out, a group shrunk to one becomes a plain reorder).
+        const { plan: groupPlan, memberKeys, target } = buildGroupDropPlan(draggedGroupKey, overId);
+        if (groupPlan.kind === "none" || target === null) return;
+        // Hold the block at its dropped position while the per-member commands
+        // apply, exactly like a single-thread drop — otherwise the group snaps
+        // back until the reorder events return. Section, order, and keys mirror
+        // the plan so grouping re-sorts the members straight to the new spot.
+        const groupAssignedKeys = new Map(
+          (groupPlan.kind === "settle-group" ? [] : groupPlan.assignments).map(
+            ({ id, orderKey }) => [id, orderKey] as const,
+          ),
+        );
+        // Project every member plus any neighbor the plan re-keys (a keyless
+        // neighbor forces a section rewrite), so the optimistic order matches
+        // what the commands will produce.
+        const projectedKeys = [...new Set([...memberKeys, ...groupAssignedKeys.keys()])];
+        const groupDrop = {
+          key: memberKeys[0]!,
+          memberKeys: projectedKeys,
+          sourceSection: "active" as const,
+          section:
+            groupPlan.kind === "reorder-active-group"
+              ? ("active" as const)
+              : groupPlan.kind === "pin-group"
+                ? ("pinned" as const)
+                : ("settled" as const),
+          occurredAt: new Date().toISOString(),
+          clearsSnooze: groupPlan.kind !== "reorder-active-group",
+          order:
+            groupPlan.kind === "reorder-active-group"
+              ? groupPlan.order
+              : groupPlan.kind === "pin-group"
+                ? target.pinnedOrder
+                : null,
+          keysAtDrop:
+            groupPlan.kind === "pin-group"
+              ? pinnedKeysById
+              : groupPlan.kind === "reorder-active-group"
+                ? activeKeysById
+                : new Map<string, string | null>(),
+          assignedKeys: groupAssignedKeys,
+        };
+        setOptimisticDrop(groupDrop);
+        const refOf = (key: string) => {
+          const thread = threadByKey.get(key);
+          return thread === undefined
+            ? null
+            : {
+                ref: scopeThreadRef(thread.environmentId, thread.id),
+                activeOrderKey: thread.activeOrderKey ?? null,
+                pinOrderKey: thread.pinOrderKey ?? null,
+              };
+        };
+        // Rollback restores each written thread's previous order key. A thread
+        // that was keyless before the move cannot be un-keyed (the reorder
+        // command requires a key), so its revert is a no-op — the only residue
+        // is on the rare keyless-neighbor materialization path, which a future
+        // atomic batch-reorder command would close (deferred per the spec).
+        const ops = buildSidebarGroupDropOperations({
+          plan: groupPlan,
+          memberKeys,
+          resolve: refOf,
+          actions: {
+            reorderActive: reorderActiveThread,
+            reorderPinned: reorderPinnedThread,
+            pin: (ref, orderKey) => pinThread(ref, { orderKey }),
+            unpin: unpinThread,
+            settle: settleThread,
+            unsettle: unsettleThread,
+          },
+        });
+        void (async () => {
+          const outcome = await executeSidebarGroupDropOperations(ops);
+          if (outcome.status === "success") return;
+          // A failed or interrupted sequence must release its preview after
+          // rolling back, but never clobber a newer drag's hold.
+          setOptimisticDrop((current) => (current === groupDrop ? null : current));
+          if (outcome.status === "interrupted") return;
+          const error = squashAtomCommandFailure(outcome.failure);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to move branch group",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        })();
+        return;
+      }
       const activeSection = sectionByThreadKey.get(activeKey);
       const target =
         event.over === null
@@ -3436,6 +3937,7 @@ export default function Sidebar() {
         activeOrder: activeKeys,
         activeKeysById,
         activeReorderableKeys: activeReorderableThreadKeys,
+        activeBranchKeyById,
       });
       if (plan.kind === "none") return;
       if (plan.kind === "settle" && settlingThreadKeysRef.current.has(activeKey)) return;
@@ -3541,11 +4043,13 @@ export default function Sidebar() {
       })();
     },
     [
+      activeBranchKeyById,
       activeKeysById,
       pinnedKeysById,
       serverConfigs,
       activeKeys,
       activeReorderableThreadKeys,
+      buildGroupDropPlan,
       draggableThreadKeys,
       pinThread,
       pinnedKeys,
@@ -4769,6 +5273,55 @@ export default function Sidebar() {
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          continue;
+                        }
+                        if (item.kind === "branch-header") {
+                          const group = branchGroupByKey.get(item.groupKey);
+                          if (group === undefined) continue;
+                          const lead = group.threads[0];
+                          const projectLabel =
+                            (lead &&
+                              projectDisplayNameByKey.get(
+                                `${lead.environmentId}:${lead.projectId}`,
+                              )) ??
+                            null;
+                          // The group can be lifted only when every member can
+                          // reorder in Active, and never while a drop settles.
+                          const groupDraggable =
+                            optimisticDrop === null &&
+                            group.threads.every((groupThread) =>
+                              activeReorderableThreadKeys.has(
+                                scopedThreadKey(
+                                  scopeThreadRef(groupThread.environmentId, groupThread.id),
+                                ),
+                              ),
+                            );
+                          items.push(
+                            <SortableSidebarBranchHeader
+                              key={item.groupKey}
+                              groupKey={item.groupKey}
+                              disabled={!groupDraggable}
+                            >
+                              {(dragListeners) => (
+                                <SidebarBranchGroupHeader
+                                  groupKey={item.groupKey}
+                                  groupThreads={group.threads}
+                                  groupExpanded={effectiveExpandedBranchGroupKeys.has(
+                                    item.groupKey,
+                                  )}
+                                  branchLabel={group.branch}
+                                  projectLabel={projectLabel}
+                                  branchContextLabel={
+                                    projectLabel
+                                      ? `${projectLabel} · ${group.branch}`
+                                      : group.branch
+                                  }
+                                  onToggleExpanded={setBranchGroupExpanded}
+                                  dragListeners={dragListeners}
+                                />
+                              )}
+                            </SortableSidebarBranchHeader>,
+                          );
                           continue;
                         }
                         switch (item.marker) {

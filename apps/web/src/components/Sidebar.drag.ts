@@ -106,15 +106,27 @@ export function createSidebarSortingStrategy(input: {
   /** Space each pinned boundary opens for its label while dragging. The
    * markers stay zero height at rest, so nothing is reserved until pickup. */
   boundaryLabelHeight?: number;
+  /** Active thread key → branch group key, only for threads under a group
+   * header. Lets the preview re-emit headers so they don't blink out mid-drag. */
+  activeBranchHeaderByKey?: ReadonlyMap<string, string>;
 }): SortingStrategy {
   const { items } = input;
   const indices = new Map(items.map((item, index) => [sidebarListItemId(item), index]));
   let previous: Pick<Layout, "rects" | "activeIndex" | "overIndex"> | undefined;
   let transforms: ReturnType<SortingStrategy>[] | null = [];
 
-  function project({ rects, activeIndex, overIndex }: Layout) {
+  function project({
+    rects,
+    activeIndex,
+    overIndex,
+  }: Layout): ReturnType<SortingStrategy>[] | null {
     const active = items[activeIndex];
     const over = items[overIndex] ?? active;
+    // A branch-group header drag moves the whole block; the thread-row
+    // projection does not model that, so fall back to the default reflow
+    // (null) rather than freezing every row. Block-drag preview polish is
+    // tracked separately and verified in a browser.
+    if (active?.kind === "branch-header") return null;
     if (active?.kind !== "thread" || !over || !rects[0]) return [];
     const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
     if (!target) return [];
@@ -135,6 +147,8 @@ export function createSidebarSortingStrategy(input: {
         }
         continue;
       }
+      // Branch-group headers carry no section and no thread key.
+      if (item.kind === "branch-header") continue;
       if (item.section === "pinned" || item.section === "active")
         cardHeight ??= rects[index]?.height;
       else slimHeight ??= rects[index]?.height;
@@ -179,7 +193,21 @@ export function createSidebarSortingStrategy(input: {
     marker("pinned-header");
     projected.push(...groups.pinned);
     marker("pinned-divider");
-    section("active");
+    // Active rows re-emit their branch-group headers at group boundaries so the
+    // headers ride the reflow instead of blinking to zero height mid-drag.
+    if (groups.active.length > 0) {
+      let lastHeaderGroup: string | undefined;
+      for (const item of groups.active) {
+        const headerGroup = input.activeBranchHeaderByKey?.get(item.key);
+        if (headerGroup !== undefined && headerGroup !== lastHeaderGroup) {
+          projected.push({ kind: "branch-header", groupKey: headerGroup });
+        }
+        lastHeaderGroup = headerGroup;
+        projected.push(item);
+      }
+    } else {
+      marker("active-placeholder");
+    }
     if (
       groups.snoozed.length > 0 ||
       ((active.section !== "snoozed" || (input.snoozedThreadCount ?? 0) > 1) &&

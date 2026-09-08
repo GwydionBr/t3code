@@ -28,11 +28,17 @@ Pinning does not prevent automatic settlement. Settling a thread removes its pin
 
 ## Group threads by branch
 
-Active threads on the same branch stay next to each other. Branch groups follow
-the first member in your saved order, and rows inside a group retain that order.
-Threads without a branch keep their normal position, and pinned threads are not
-regrouped. Moving one active thread can therefore move its whole branch group
-relative to the other active threads.
+Active threads on the same branch stay next to each other under a branch header
+that shows the group's live status and how many of its threads have a terminal
+running. Click the header to collapse the group down to its lead thread, or to
+expand it again. Threads without a branch keep their normal position, and pinned
+threads are not regrouped.
+
+On web and desktop, dragging reorders threads **within** a branch group; a group
+stays a single block, so you cannot drag one thread out of its group.
+Drag the branch header to move the whole group. Dropping the header in the
+pinned section pins every thread in the group; dropping it in **Settled** settles
+every thread. The separate rows are no longer grouped after either move.
 
 On web and desktop, drag a thread between sections to change its state. Drag a thread up into
 the pinned section to pin it at the spot you drop it; drag a pinned thread down into the active
