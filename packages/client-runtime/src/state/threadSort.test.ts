@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  activeThreadBranchGroupKey,
   groupActiveThreadsByBranch,
   generateSpreadPinOrderKeys,
   pinOrderKeyBetween,
@@ -221,6 +222,25 @@ describe("groupActiveThreadsByBranch", () => {
       ...overrides,
     };
   }
+
+  it("uses one stable identity for branch groups and keeps branchless threads separate", () => {
+    expect(
+      activeThreadBranchGroupKey({
+        id: "thread-1",
+        environmentId: "env-1",
+        projectId: "project-1",
+        branch: "main",
+      }),
+    ).toBe("branch:env-1:project-1:main");
+    expect(
+      activeThreadBranchGroupKey({
+        id: "thread-1",
+        environmentId: "env-1",
+        projectId: "project-1",
+        branch: null,
+      }),
+    ).toBe("thread:env-1:thread-1");
+  });
 
   it("keeps identical branch names independent across environments and projects", () => {
     const groups = groupActiveThreadsByBranch([

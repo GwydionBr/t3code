@@ -40,9 +40,10 @@ A branch group is a **hard contiguous block**.
 - A header-drag across a section boundary pins or settles **all** members
   together. Grouping does not exist in the pinned or settled sections, so the
   block dissolves there into independent rows placed as an adjacent run.
-- A whole-group move is **all-or-nothing**: it issues one reorder per member and
-  rolls the entire move back if any command fails, because a half-moved group
-  violates the block invariant.
+- A whole-group move is presented as one action but currently issues one command
+  per member. If a command fails or is interrupted, the client rolls back each
+  earlier write that the existing APIs can reverse. An atomic batch command is
+  required before this can be a strict transactional guarantee.
 - Grouping applies to the active section on web only. Pinned stays ungrouped,
   mobile stays flat, keyboard DnD is out of scope — each is a separate future
   decision, not a promise.
@@ -52,9 +53,10 @@ A branch group is a **hard contiguous block**.
 - The flat dnd-kit list and grouping coexist via a contiguity guard: any active
   drop that would split or interleave a group is rejected, enforced during
   collision detection (not only at drop time) so illegality is visible mid-drag.
-- Moving a group costs N reorder commands instead of the system's usual one key
-  on one thread. Groups are small, so this is accepted; an atomic batch reorder
-  command is a possible future contract addition if it becomes a problem.
+- Moving a group costs N commands instead of the system's usual single command.
+  Groups are small, so this is accepted. Rollback is best-effort because a
+  previously keyless active thread cannot be restored to a keyless state through
+  the current reorder command; grouping still keeps the visible block contiguous.
 - The layout snapshot is frozen for the duration of a drag; group membership is
   reconciled against live state on drop (a member settled mid-drag is dropped
   from the move; a group shrunk to one becomes a plain single-thread reorder).

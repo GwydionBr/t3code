@@ -36,6 +36,9 @@ threads are not regrouped.
 
 On web and desktop, dragging reorders threads **within** a branch group; a group
 stays a single block, so you cannot drag one thread out of its group.
+Drag the branch header to move the whole group. Dropping the header in the
+pinned section pins every thread in the group; dropping it in **Settled** settles
+every thread. The separate rows are no longer grouped after either move.
 
 On web and desktop, drag a thread between sections to change its state. Drag a thread up into
 the pinned section to pin it at the spot you drop it; drag a pinned thread down into the active

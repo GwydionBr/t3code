@@ -19,6 +19,7 @@ import {
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  activeThreadBranchGroupKey,
   groupActiveThreadsByBranch,
   resolveSettledThreadTimestamp,
 } from "@t3tools/client-runtime/state/thread-sort";
@@ -141,10 +142,12 @@ import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
+  buildSidebarGroupDropOperations,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
   countThreadsWithRunningTerminals,
   deleteSelectedThreadEntries,
+  executeSidebarGroupDropOperations,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -251,20 +254,6 @@ const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
 const expandedBranchGroupsSchema = Schema.Array(Schema.String);
-
-// Branch group key: same shape client-runtime's grouping uses internally, so a
-// header id and the drag contiguity map agree on what "one group" is. Branchless
-// threads get a per-thread key and never merge into a shared group.
-function branchGroupKeyOf(thread: {
-  readonly id: string;
-  readonly environmentId?: string | undefined;
-  readonly projectId?: string | undefined;
-  readonly branch?: string | null | undefined;
-}): string {
-  return thread.branch == null
-    ? `thread:${thread.environmentId ?? ""}:${thread.id}`
-    : `branch:${thread.environmentId ?? ""}:${thread.projectId ?? ""}:${thread.branch}`;
-}
 
 const BRANCH_STATUS_PRESENTATION: Record<
   SidebarBranchStatus,
@@ -2903,7 +2892,7 @@ export default function Sidebar() {
     for (const group of groupActiveThreadsByBranch(activeThreads)) {
       const first = group.threads[0];
       if (first === undefined) continue;
-      const groupKey = branchGroupKeyOf(first);
+      const groupKey = activeThreadBranchGroupKey(first);
       const hasHeader = group.branch !== null && group.threads.length > 1;
       if (hasHeader) byKey.set(groupKey, { branch: group.branch!, threads: group.threads });
       for (const thread of group.threads) {
@@ -3413,13 +3402,16 @@ export default function Sidebar() {
       setOptimisticDrop(null);
       return;
     }
-    const canonicalSection = effectiveSnoozed(thread, { now: new Date().toISOString() })
-      ? "snoozed"
-      : thread.settledOverride === "settled"
-        ? "settled"
-        : thread.pinnedAt != null
-          ? "pinned"
-          : "active";
+    const now = new Date().toISOString();
+    const canonicalSectionOf = (candidate: EnvironmentThreadShell): SidebarSection =>
+      effectiveSnoozed(candidate, { now })
+        ? "snoozed"
+        : candidate.settledOverride === "settled"
+          ? "settled"
+          : candidate.pinnedAt != null
+            ? "pinned"
+            : "active";
+    const canonicalSection = canonicalSectionOf(thread);
     if (
       canonicalSection !== optimisticDrop.sourceSection &&
       canonicalSection !== optimisticDrop.section
@@ -3428,12 +3420,24 @@ export default function Sidebar() {
       return;
     }
     if (optimisticDrop.order === null) {
-      // Settle also emits unpin/unsnooze events. Wait for the entire move
-      // before releasing the projected fields and sort timestamps.
+      // A group settle is dispatched member by member. Keep the complete
+      // optimistic block until every member has landed, rather than exposing a
+      // transient half-settled group as soon as the lead thread updates.
+      const memberThreads = (optimisticDrop.memberKeys ?? [optimisticDrop.key]).map((key) =>
+        canonicalByKey.get(key),
+      );
+      if (memberThreads.some((candidate) => candidate === undefined)) {
+        setOptimisticDrop(null);
+        return;
+      }
       if (
-        canonicalSection === optimisticDrop.section &&
-        thread.pinnedAt == null &&
-        (!optimisticDrop.clearsSnooze || thread.snoozedUntil == null)
+        memberThreads.every(
+          (candidate) =>
+            candidate !== undefined &&
+            canonicalSectionOf(candidate) === optimisticDrop.section &&
+            candidate.pinnedAt == null &&
+            (!optimisticDrop.clearsSnooze || candidate.snoozedUntil == null),
+        )
       ) {
         setOptimisticDrop(null);
       }
@@ -3575,7 +3579,7 @@ export default function Sidebar() {
         items.push(...rowsOf(group.threads, "active"));
         continue;
       }
-      const groupKey = branchGroupKeyOf(first);
+      const groupKey = activeThreadBranchGroupKey(first);
       items.push({ kind: "branch-header", groupKey });
       // The group holding the open thread auto-expands (see
       // effectiveExpandedBranchGroupKeys), so a collapsed group is never the
@@ -3823,7 +3827,6 @@ export default function Sidebar() {
         // mid-drag drops out, a group shrunk to one becomes a plain reorder).
         const { plan: groupPlan, memberKeys, target } = buildGroupDropPlan(draggedGroupKey, overId);
         if (groupPlan.kind === "none" || target === null) return;
-        const memberSet = new Set(memberKeys);
         // Hold the block at its dropped position while the per-member commands
         // apply, exactly like a single-thread drop — otherwise the group snaps
         // back until the reorder events return. Section, order, and keys mirror
@@ -3868,88 +3871,45 @@ export default function Sidebar() {
           const thread = threadByKey.get(key);
           return thread === undefined
             ? null
-            : { thread, ref: scopeThreadRef(thread.environmentId, thread.id) };
-        };
-        type GroupOp = {
-          readonly apply: () => Promise<AtomCommandResult<unknown, unknown>>;
-          readonly revert: (() => Promise<AtomCommandResult<unknown, unknown>>) | null;
+            : {
+                ref: scopeThreadRef(thread.environmentId, thread.id),
+                activeOrderKey: thread.activeOrderKey ?? null,
+                pinOrderKey: thread.pinOrderKey ?? null,
+              };
         };
         // Rollback restores each written thread's previous order key. A thread
         // that was keyless before the move cannot be un-keyed (the reorder
         // command requires a key), so its revert is a no-op — the only residue
         // is on the rare keyless-neighbor materialization path, which a future
         // atomic batch-reorder command would close (deferred per the spec).
-        const ops: GroupOp[] = [];
-        if (groupPlan.kind === "reorder-active-group") {
-          for (const assignment of groupPlan.assignments) {
-            const resolved = refOf(assignment.id);
-            if (resolved === null) continue;
-            const originalKey = resolved.thread.activeOrderKey ?? null;
-            ops.push({
-              apply: () => reorderActiveThread(resolved.ref, assignment.orderKey),
-              revert:
-                originalKey === null ? null : () => reorderActiveThread(resolved.ref, originalKey),
-            });
-          }
-        } else if (groupPlan.kind === "pin-group") {
-          for (const assignment of groupPlan.assignments) {
-            const resolved = refOf(assignment.id);
-            if (resolved === null) continue;
-            if (memberSet.has(assignment.id)) {
-              // New pins: pinning and un-pinning are the move and its undo.
-              ops.push({
-                apply: () => pinThread(resolved.ref, { orderKey: assignment.orderKey }),
-                revert: () => unpinThread(resolved.ref),
-              });
-            } else {
-              // Materialization also re-keys existing pins; that is a reorder.
-              const originalKey = resolved.thread.pinOrderKey ?? null;
-              ops.push({
-                apply: () => reorderPinnedThread(resolved.ref, assignment.orderKey),
-                revert:
-                  originalKey === null
-                    ? null
-                    : () => reorderPinnedThread(resolved.ref, originalKey),
-              });
-            }
-          }
-        } else {
-          for (const key of groupPlan.members) {
-            const resolved = refOf(key);
-            if (resolved === null) continue;
-            ops.push({
-              apply: () => settleThread(resolved.ref),
-              revert: () => unsettleThread(resolved.ref),
-            });
-          }
-        }
+        const ops = buildSidebarGroupDropOperations({
+          plan: groupPlan,
+          memberKeys,
+          resolve: refOf,
+          actions: {
+            reorderActive: reorderActiveThread,
+            reorderPinned: reorderPinnedThread,
+            pin: (ref, orderKey) => pinThread(ref, { orderKey }),
+            unpin: unpinThread,
+            settle: settleThread,
+            unsettle: unsettleThread,
+          },
+        });
         void (async () => {
-          const applied: GroupOp[] = [];
-          for (const op of ops) {
-            const result = await op.apply();
-            if (result._tag === "Success") {
-              applied.push(op);
-              continue;
-            }
-            if (isAtomCommandInterrupted(result)) return;
-            // The move failed: drop the held preview so the block returns to
-            // its origin, but never clobber a newer drag's hold.
-            setOptimisticDrop((current) => (current === groupDrop ? null : current));
-            // A half-moved group splits the block, so undo what landed, in
-            // reverse so the earliest write settles back last.
-            for (const done of applied.toReversed()) {
-              if (done.revert) await done.revert();
-            }
-            const error = squashAtomCommandFailure(result);
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Failed to move branch group",
-                description: error instanceof Error ? error.message : "An error occurred.",
-              }),
-            );
-            return;
-          }
+          const outcome = await executeSidebarGroupDropOperations(ops);
+          if (outcome.status === "success") return;
+          // A failed or interrupted sequence must release its preview after
+          // rolling back, but never clobber a newer drag's hold.
+          setOptimisticDrop((current) => (current === groupDrop ? null : current));
+          if (outcome.status === "interrupted") return;
+          const error = squashAtomCommandFailure(outcome.failure);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to move branch group",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
         })();
         return;
       }

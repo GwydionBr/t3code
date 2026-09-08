@@ -122,6 +122,20 @@ export interface ActiveThreadBranchGroup<T> {
   readonly threads: T[];
 }
 
+/** Stable identity shared by branch grouping and every client-side affordance
+    that needs to refer to the same group. Branchless threads deliberately get
+    a per-thread identity instead of forming one synthetic group. */
+export function activeThreadBranchGroupKey(thread: {
+  readonly id: string;
+  readonly environmentId?: string | undefined;
+  readonly projectId?: string | undefined;
+  readonly branch?: string | null | undefined;
+}): string {
+  return thread.branch == null
+    ? `thread:${thread.environmentId ?? ""}:${thread.id}`
+    : `branch:${thread.environmentId ?? ""}:${thread.projectId ?? ""}:${thread.branch}`;
+}
+
 /** Keeps active threads from the same workspace branch together. Groups are
     ordered by their first thread in the persisted active order; rows inside
     a group retain that order. New and reopened threads still lead keyed rows.
@@ -142,10 +156,7 @@ export function groupActiveThreadsByBranch<
   const groups = new Map<string, ActiveThreadBranchGroup<T>>();
 
   for (const thread of ordered) {
-    const key =
-      thread.branch == null
-        ? `thread:${thread.environmentId ?? ""}:${thread.id}`
-        : `branch:${thread.environmentId ?? ""}:${thread.projectId ?? ""}:${thread.branch}`;
+    const key = activeThreadBranchGroupKey(thread);
     const group = groups.get(key);
     if (group) group.threads.push(thread);
     else groups.set(key, { branch: thread.branch ?? null, threads: [thread] });
