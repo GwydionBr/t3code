@@ -4,8 +4,10 @@ import {
   groupActiveThreadsByBranch,
   generateSpreadPinOrderKeys,
   pinOrderKeyBetween,
+  planContiguousBlockReorder,
   planPinnedMove,
   planPinnedReorder,
+  spreadPinOrderKeysBetween,
   resolveSettledThreadTimestamp,
   sortActiveThreadsByBranch,
   sortActiveThreadsByOrderKey,
@@ -462,5 +464,93 @@ describe("sortActiveThreadsByOrderKey", () => {
     const keys = new Map(assignments.map((assignment) => [assignment.id, assignment.orderKey]));
     const updated = threads.map((thread) => ({ ...thread, activeOrderKey: keys.get(thread.id) }));
     expect(sortActiveThreadsByOrderKey(updated).map((thread) => thread.id)).toEqual(orderedIds);
+  });
+});
+
+describe("spreadPinOrderKeysBetween", () => {
+  it("returns the requested count, strictly increasing and inside the bounds", () => {
+    const keys = spreadPinOrderKeysBetween("f", "t", 3)!;
+    expect(keys).toHaveLength(3);
+    expect([...keys].sort()).toEqual(keys);
+    expect(new Set(keys).size).toBe(3);
+    expect(keys.every((key) => key > "f" && key < "t")).toBe(true);
+  });
+
+  it("treats null bounds as the open ends of the run", () => {
+    const keys = spreadPinOrderKeysBetween(null, null, 4)!;
+    expect(keys).toHaveLength(4);
+    expect([...keys].sort()).toEqual(keys);
+  });
+
+  it("returns an empty list for a zero count and null for an impossible gap", () => {
+    expect(spreadPinOrderKeysBetween("f", "t", 0)).toEqual([]);
+    expect(spreadPinOrderKeysBetween("t", "f", 2)).toBeNull();
+  });
+});
+
+describe("planContiguousBlockReorder", () => {
+  it("places the block between keyed neighbors without touching non-members", () => {
+    // order after moving the [g1,g2] block between a and b.
+    const assignments = planContiguousBlockReorder({
+      orderedIds: ["a", "g1", "g2", "b"],
+      keysById: new Map([
+        ["a", "f"],
+        ["b", "t"],
+        ["g1", "h"],
+        ["g2", "n"],
+      ]),
+      movedIds: ["g1", "g2"],
+    });
+    expect(assignments.map((entry) => entry.id)).toEqual(["g1", "g2"]);
+    const [k1, k2] = assignments.map((entry) => entry.orderKey);
+    expect("f" < k1! && k1! < k2! && k2! < "t").toBe(true);
+  });
+
+  it("keeps the block ordered against the open top of the run", () => {
+    const assignments = planContiguousBlockReorder({
+      orderedIds: ["g1", "g2", "a"],
+      keysById: new Map([
+        ["a", "t"],
+        ["g1", "x"],
+        ["g2", "y"],
+      ]),
+      movedIds: ["g1", "g2"],
+    });
+    const keys = assignments.map((entry) => entry.orderKey);
+    expect(keys.every((key) => key < "t")).toBe(true);
+    expect([...keys].sort()).toEqual(keys);
+  });
+
+  it("materializes the whole section when a neighbor is keyless", () => {
+    const assignments = planContiguousBlockReorder({
+      orderedIds: ["a", "g1", "g2", "b"],
+      keysById: new Map([
+        ["a", null],
+        ["b", "t"],
+        ["g1", null],
+        ["g2", null],
+      ]),
+      movedIds: ["g1", "g2"],
+    });
+    expect(assignments.map((entry) => entry.id)).toEqual(["a", "g1", "g2", "b"]);
+    const keys = assignments.map((entry) => entry.orderKey);
+    expect([...keys].sort()).toEqual(keys);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("reserves keys held by hidden rows outside the visible order", () => {
+    const reserved = pinOrderKeyBetween("f", "t")!;
+    const assignments = planContiguousBlockReorder({
+      orderedIds: ["a", "g1", "g2", "b"],
+      keysById: new Map([
+        ["a", "f"],
+        ["b", "t"],
+        ["g1", "h"],
+        ["g2", "n"],
+        ["hidden", reserved],
+      ]),
+      movedIds: ["g1", "g2"],
+    });
+    expect(assignments.every((entry) => entry.orderKey !== reserved)).toBe(true);
   });
 });

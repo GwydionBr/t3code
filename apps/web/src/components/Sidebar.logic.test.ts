@@ -4,6 +4,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import {
   activeOrderKeepsBranchGroupsContiguous,
+  resolveEffectiveExpandedBranchGroups,
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
   archiveSelectedThreadEntries,
@@ -37,9 +38,13 @@ import {
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
   resolveSidebarDropTarget,
+  resolveSidebarGroupDropTarget,
+  parseSidebarBranchHeaderId,
   pinOrderKeyBetween,
   planPinnedReorder,
   planSidebarThreadDrop,
+  planSidebarGroupDrop,
+  sidebarBranchHeaderId,
   sidebarMarkerId,
   sidebarListItemId,
   sortPinnedThreadsForSidebar,
@@ -1322,6 +1327,235 @@ describe("activeOrderKeepsBranchGroupsContiguous", () => {
     expect(activeOrderKeepsBranchGroupsContiguous(["a1", "a2", "hidden"], branchKeyById)).toBe(
       true,
     );
+  });
+});
+
+describe("parseSidebarBranchHeaderId", () => {
+  it("round-trips a group key through the header id", () => {
+    const groupKey = "branch:env:proj:main";
+    expect(parseSidebarBranchHeaderId(sidebarBranchHeaderId(groupKey))).toBe(groupKey);
+  });
+
+  it("returns null for thread keys and markers", () => {
+    expect(parseSidebarBranchHeaderId("env:thread-1")).toBeNull();
+    expect(parseSidebarBranchHeaderId(sidebarMarkerId("pinned-divider"))).toBeNull();
+  });
+});
+
+describe("resolveSidebarGroupDropTarget", () => {
+  const thread = (key: string, section: SidebarSection): SidebarListItem => ({
+    kind: "thread",
+    key,
+    section,
+  });
+  const marker = (marker: SidebarListMarker): SidebarListItem => ({ kind: "marker", marker });
+  const groupKey = "branch:env:proj:main";
+  // Pinned p1 | Active a0 [group m1 m2] | Settled s1
+  const items: readonly SidebarListItem[] = [
+    marker("pinned-header"),
+    thread("p1", "pinned"),
+    marker("pinned-divider"),
+    thread("a0", "active"),
+    { kind: "branch-header", groupKey },
+    thread("m1", "active"),
+    thread("m2", "active"),
+    marker("settled-header"),
+    thread("s1", "settled"),
+  ];
+  const resolve = (overId: string) =>
+    resolveSidebarGroupDropTarget(items, groupKey, ["m1", "m2"], overId);
+
+  it("reorders the whole block above a standalone active row", () => {
+    expect(resolve("a0")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["m1", "m2", "a0"],
+    });
+  });
+
+  it("dissolves the block into the pinned run", () => {
+    expect(resolve("p1")).toEqual({
+      section: "pinned",
+      pinnedOrder: ["m1", "m2", "p1"],
+      activeOrder: ["a0"],
+    });
+  });
+
+  it("dissolves the block into the settled section", () => {
+    expect(resolve("s1")?.section).toBe("settled");
+  });
+
+  it("is a no-op when dropping on the group's own rows or header", () => {
+    expect(resolve("m1")).toBeNull();
+    expect(resolve(sidebarBranchHeaderId(groupKey))).toBeNull();
+  });
+});
+
+describe("planSidebarGroupDrop", () => {
+  const activeKeysById = new Map<string, string | null>([
+    ["a0", "f"],
+    ["m1", "m"],
+    ["m2", "t"],
+  ]);
+  const pinnedKeysById = new Map<string, string | null>([["p1", "m"]]);
+
+  it("reorders the block within Active, writing a key per member", () => {
+    const result = planSidebarGroupDrop({
+      memberKeys: ["m1", "m2"],
+      target: { section: "active", pinnedOrder: ["p1"], activeOrder: ["m1", "m2", "a0"] },
+      activeOrder: ["a0", "m1", "m2"],
+      activeKeysById,
+      pinnedKeysById,
+    });
+    expect(result.kind).toBe("reorder-active-group");
+    if (result.kind !== "reorder-active-group") return;
+    expect(result.assignments.map((entry) => entry.id)).toEqual(["m1", "m2"]);
+    const keys = result.assignments.map((entry) => entry.orderKey);
+    expect([...keys].sort()).toEqual(keys);
+    expect(keys.every((key) => key < "f")).toBe(true);
+  });
+
+  it("is a no-op when the active order is unchanged", () => {
+    expect(
+      planSidebarGroupDrop({
+        memberKeys: ["m1", "m2"],
+        target: { section: "active", pinnedOrder: ["p1"], activeOrder: ["a0", "m1", "m2"] },
+        activeOrder: ["a0", "m1", "m2"],
+        activeKeysById,
+        pinnedKeysById,
+      }),
+    ).toEqual({ kind: "none" });
+  });
+
+  it("rejects a block move that would split a different group", () => {
+    expect(
+      planSidebarGroupDrop({
+        memberKeys: ["m1", "m2"],
+        target: { section: "active", pinnedOrder: [], activeOrder: ["n1", "m1", "m2", "n2"] },
+        activeOrder: ["m1", "m2", "n1", "n2"],
+        activeKeysById,
+        pinnedKeysById,
+        activeBranchKeyById: new Map([
+          ["m1", "gM"],
+          ["m2", "gM"],
+          ["n1", "gN"],
+          ["n2", "gN"],
+        ]),
+      }),
+    ).toEqual({ kind: "none" });
+  });
+
+  it("pins every member as an adjacent run", () => {
+    const result = planSidebarGroupDrop({
+      memberKeys: ["m1", "m2"],
+      target: { section: "pinned", pinnedOrder: ["m1", "m2", "p1"], activeOrder: ["a0"] },
+      activeOrder: ["a0", "m1", "m2"],
+      activeKeysById,
+      pinnedKeysById,
+    });
+    expect(result.kind).toBe("pin-group");
+    if (result.kind !== "pin-group") return;
+    expect(result.members).toEqual(["m1", "m2"]);
+    expect(result.assignments.map((entry) => entry.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("settles every member, honoring settlement support", () => {
+    const settleTarget = {
+      section: "settled" as const,
+      pinnedOrder: ["p1"],
+      activeOrder: ["a0"],
+    };
+    expect(
+      planSidebarGroupDrop({
+        memberKeys: ["m1", "m2"],
+        target: settleTarget,
+        activeOrder: ["a0", "m1", "m2"],
+        activeKeysById,
+        pinnedKeysById,
+      }),
+    ).toEqual({ kind: "settle-group", members: ["m1", "m2"] });
+    expect(
+      planSidebarGroupDrop({
+        memberKeys: ["m1", "m2"],
+        target: settleTarget,
+        supportsSettlement: false,
+        activeOrder: ["a0", "m1", "m2"],
+        activeKeysById,
+        pinnedKeysById,
+      }),
+    ).toEqual({ kind: "none" });
+  });
+
+  it("reconciles a group shrunk to a single member into a plain reorder", () => {
+    // Mid-drag a member left the group; live membership is one thread, so the
+    // move resolves to a single-member block reorder rather than a group move.
+    const result = planSidebarGroupDrop({
+      memberKeys: ["m1"],
+      target: { section: "active", pinnedOrder: [], activeOrder: ["m1", "a0"] },
+      activeOrder: ["a0", "m1"],
+      activeKeysById,
+      pinnedKeysById,
+    });
+    expect(result.kind).toBe("reorder-active-group");
+    if (result.kind !== "reorder-active-group") return;
+    expect(result.assignments.map((entry) => entry.id)).toEqual(["m1"]);
+  });
+});
+
+describe("resolveEffectiveExpandedBranchGroups", () => {
+  it("returns the remembered set unchanged when no group holds the open thread", () => {
+    const expanded = new Set(["gX"]);
+    expect(
+      resolveEffectiveExpandedBranchGroups({
+        expandedGroupKeys: expanded,
+        activeThreadGroupKey: null,
+        autoExpandSuppressedGroupKey: null,
+      }),
+    ).toBe(expanded);
+  });
+
+  it("auto-expands the group holding the open thread", () => {
+    expect([
+      ...resolveEffectiveExpandedBranchGroups({
+        expandedGroupKeys: new Set(["gX"]),
+        activeThreadGroupKey: "gY",
+        autoExpandSuppressedGroupKey: null,
+      }),
+    ]).toEqual(["gX", "gY"]);
+  });
+
+  it("leaves an already-remembered active group untouched", () => {
+    const expanded = new Set(["gY"]);
+    expect(
+      resolveEffectiveExpandedBranchGroups({
+        expandedGroupKeys: expanded,
+        activeThreadGroupKey: "gY",
+        autoExpandSuppressedGroupKey: null,
+      }),
+    ).toBe(expanded);
+  });
+
+  it("lets a manual collapse of the active group win over auto-expand", () => {
+    const expanded = new Set<string>();
+    expect(
+      resolveEffectiveExpandedBranchGroups({
+        expandedGroupKeys: expanded,
+        activeThreadGroupKey: "gY",
+        autoExpandSuppressedGroupKey: "gY",
+      }),
+    ).toBe(expanded);
+  });
+
+  it("still auto-expands when the suppression belongs to a different group", () => {
+    // A suppression left over from a group the open thread has since left must
+    // not block auto-expand of the group it is in now.
+    expect([
+      ...resolveEffectiveExpandedBranchGroups({
+        expandedGroupKeys: new Set<string>(),
+        activeThreadGroupKey: "gY",
+        autoExpandSuppressedGroupKey: "gX",
+      }),
+    ]).toEqual(["gY"]);
   });
 });
 

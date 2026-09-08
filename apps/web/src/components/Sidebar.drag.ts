@@ -115,9 +115,18 @@ export function createSidebarSortingStrategy(input: {
   let previous: Pick<Layout, "rects" | "activeIndex" | "overIndex"> | undefined;
   let transforms: ReturnType<SortingStrategy>[] | null = [];
 
-  function project({ rects, activeIndex, overIndex }: Layout) {
+  function project({
+    rects,
+    activeIndex,
+    overIndex,
+  }: Layout): ReturnType<SortingStrategy>[] | null {
     const active = items[activeIndex];
     const over = items[overIndex] ?? active;
+    // A branch-group header drag moves the whole block; the thread-row
+    // projection does not model that, so fall back to the default reflow
+    // (null) rather than freezing every row. Block-drag preview polish is
+    // tracked separately and verified in a browser.
+    if (active?.kind === "branch-header") return null;
     if (active?.kind !== "thread" || !over || !rects[0]) return [];
     const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
     if (!target) return [];

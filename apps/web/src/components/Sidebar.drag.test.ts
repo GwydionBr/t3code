@@ -836,4 +836,18 @@ describe("branch group headers in the sorting preview", () => {
     // A re-emitted header projects to a real slot, never the zero-scaleY hide.
     expect(result.get(sidebarBranchHeaderId(groupKey))?.scaleY).toBe(1);
   });
+
+  it("reflows with the default strategy while the header itself is dragged", () => {
+    // The block-move projection is not modelled here, so a header drag must
+    // fall back to the default vertical reflow rather than freezing every row.
+    const strategy = createSidebarSortingStrategy({
+      items,
+      settledOrder: [],
+      settledExpanded: true,
+    });
+    const args = layout(items, sidebarBranchHeaderId(groupKey), "a2");
+    for (let index = 0; index < items.length; index += 1) {
+      expect(strategy({ ...args, index })).toEqual(verticalListSortingStrategy({ ...args, index }));
+    }
+  });
 });

@@ -7,7 +7,10 @@ import {
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  planContiguousBlockReorder,
+  planPinnedReorder,
+} from "@t3tools/client-runtime/state/thread-sort";
 import {
   sortActiveThreadsByBranch,
   getThreadSortTimestamp,
@@ -121,6 +124,15 @@ const SIDEBAR_BRANCH_HEADER_PREFIX = "sidebar-branch-";
 
 export function sidebarBranchHeaderId(groupKey: string): string {
   return `${SIDEBAR_BRANCH_HEADER_PREFIX}${groupKey}`;
+}
+
+/** The group key inside a branch-header sortable id, or null for any other id
+    (thread keys, markers). Lets the drag handlers tell a whole-group header
+    drag from an ordinary thread-row drag. */
+export function parseSidebarBranchHeaderId(id: string): string | null {
+  return id.startsWith(SIDEBAR_BRANCH_HEADER_PREFIX)
+    ? id.slice(SIDEBAR_BRANCH_HEADER_PREFIX.length)
+    : null;
 }
 
 export type SidebarListItem =
@@ -256,6 +268,33 @@ export function activeOrderKeepsBranchGroupsContiguous(
   return true;
 }
 
+/** The branch groups that render expanded, combining the user's remembered
+    expand choices with a temporary auto-expand of the group holding the open
+    thread — so the active thread is never hidden behind a collapsed header.
+
+    The auto-expand is a convenience, not a cage: it never persists, and a
+    manual collapse of that same group wins over it (`autoExpandSuppressedGroupKey`).
+    The suppression is keyed to the active group, so it lapses on its own once
+    the open thread moves to another group and the auto-expand stops applying. */
+export function resolveEffectiveExpandedBranchGroups(input: {
+  /** Persisted manual-expand set; groups absent from it render collapsed. */
+  readonly expandedGroupKeys: ReadonlySet<string>;
+  /** Group key of the open thread, only when it sits in a headered group. */
+  readonly activeThreadGroupKey: string | null;
+  /** Group the user manually collapsed while it held the open thread. */
+  readonly autoExpandSuppressedGroupKey: string | null;
+}): ReadonlySet<string> {
+  const { expandedGroupKeys, activeThreadGroupKey, autoExpandSuppressedGroupKey } = input;
+  if (
+    activeThreadGroupKey === null ||
+    expandedGroupKeys.has(activeThreadGroupKey) ||
+    autoExpandSuppressedGroupKey === activeThreadGroupKey
+  ) {
+    return expandedGroupKeys;
+  }
+  return new Set(expandedGroupKeys).add(activeThreadGroupKey);
+}
+
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
   readonly activeSection: SidebarSection;
@@ -359,6 +398,135 @@ export function planSidebarThreadDrop(input: {
           ? assignments
           : assignments.filter((assignment) => assignment.id !== activeKey),
       };
+    }
+  }
+}
+
+/** Where a whole branch group lands when its header is dragged onto `overId`.
+    The group's member rows and its header slot lift out together; the block is
+    re-inserted in its existing member order at the over position, then the
+    destination section and the resulting pinned/active orders are read back.
+    Null when the drop lands on the group's own rows or in the snoozed shelf. */
+export function resolveSidebarGroupDropTarget(
+  items: readonly SidebarListItem[],
+  groupKey: string,
+  memberKeys: readonly string[],
+  overId: string,
+): SidebarDropTarget | null {
+  const memberSet = new Set(memberKeys);
+  const isMoving = (item: SidebarListItem) =>
+    (item.kind === "thread" && memberSet.has(item.key)) ||
+    (item.kind === "branch-header" && item.groupKey === groupKey);
+  const reduced = items.filter((item) => !isMoving(item));
+  const overIndex = reduced.findIndex((item) => sidebarListItemId(item) === overId);
+  // overId is unknown, or it is one of the lifted rows — a no-op either way.
+  if (overIndex === -1) return null;
+  const block: SidebarListItem[] = memberKeys.map((key) => ({
+    kind: "thread",
+    key,
+    section: "active",
+  }));
+  const moved = [...reduced];
+  moved.splice(overIndex, 0, ...block);
+  const section = sectionAtSidebarSlot(moved, overIndex);
+  if (section === "snoozed") return null;
+  const pinnedOrder: string[] = [];
+  const activeOrder: string[] = [];
+  let currentSection: SidebarSection = "pinned";
+  for (const item of moved) {
+    if (item.kind === "marker") {
+      if (item.marker === "pinned-divider") currentSection = "active";
+      else if (item.marker === "snoozed-header" || item.marker === "settled-header") break;
+      continue;
+    }
+    if (item.kind !== "thread") continue;
+    if (currentSection === "pinned") pinnedOrder.push(item.key);
+    else activeOrder.push(item.key);
+  }
+  return { section, pinnedOrder, activeOrder };
+}
+
+/** A whole-group move: the block stays together and either reorders within the
+    active run or dissolves into an adjacent run of independent rows in the
+    pinned or settled section (grouping is active-only — ADR 0001). Every member
+    is moved or none is; the caller rolls back on any command failure. */
+export type SidebarGroupDropPlan =
+  | { readonly kind: "none" }
+  | {
+      readonly kind: "reorder-active-group";
+      readonly order: readonly string[];
+      readonly assignments: ReadonlyArray<{ readonly id: string; readonly orderKey: string }>;
+    }
+  | {
+      readonly kind: "pin-group";
+      readonly members: readonly string[];
+      readonly assignments: ReadonlyArray<{ readonly id: string; readonly orderKey: string }>;
+    }
+  | { readonly kind: "settle-group"; readonly members: readonly string[] };
+
+export function planSidebarGroupDrop(input: {
+  /** The moved group's member keys, in their current (contiguous) order. */
+  readonly memberKeys: readonly string[];
+  readonly supportsSettlement?: boolean;
+  readonly target: SidebarDropTarget;
+  readonly pinnedKeysById: ReadonlyMap<string, string | null | undefined>;
+  readonly reorderableKeys?: ReadonlySet<string>;
+  readonly activeOrder: readonly string[];
+  readonly activeKeysById: ReadonlyMap<string, string | null | undefined>;
+  readonly activeReorderableKeys?: ReadonlySet<string>;
+  /** Active thread key → branch group key, so a block move that would split a
+   *different* group resolves to `none` (members stay contiguous by build). */
+  readonly activeBranchKeyById?: ReadonlyMap<string, string>;
+}): SidebarGroupDropPlan {
+  const {
+    memberKeys,
+    target,
+    pinnedKeysById,
+    reorderableKeys,
+    activeOrder,
+    activeKeysById,
+    activeReorderableKeys,
+  } = input;
+  if (memberKeys.length === 0) return { kind: "none" };
+  switch (target.section) {
+    case "active": {
+      const order = target.activeOrder;
+      if (
+        order.length === activeOrder.length &&
+        order.every((key, index) => key === activeOrder[index])
+      ) {
+        return { kind: "none" };
+      }
+      if (
+        input.activeBranchKeyById &&
+        !activeOrderKeepsBranchGroupsContiguous(order, input.activeBranchKeyById)
+      ) {
+        return { kind: "none" };
+      }
+      const assignments = planContiguousBlockReorder({
+        orderedIds: order,
+        keysById: activeKeysById,
+        movedIds: memberKeys,
+      });
+      if (activeReorderableKeys && assignments.some(({ id }) => !activeReorderableKeys.has(id))) {
+        return { kind: "none" };
+      }
+      return { kind: "reorder-active-group", order, assignments };
+    }
+    case "settled":
+      return input.supportsSettlement === false
+        ? { kind: "none" }
+        : { kind: "settle-group", members: memberKeys };
+    case "pinned": {
+      const assignments = planContiguousBlockReorder({
+        orderedIds: target.pinnedOrder,
+        keysById: pinnedKeysById,
+        movedIds: memberKeys,
+      });
+      if (reorderableKeys && assignments.some(({ id }) => !reorderableKeys.has(id))) {
+        return { kind: "none" };
+      }
+      return { kind: "pin-group", members: memberKeys, assignments };
     }
   }
 }
