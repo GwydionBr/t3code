@@ -1457,7 +1457,7 @@ describe("resolveSidebarGroupDropTarget", () => {
   });
   const marker = (marker: SidebarListMarker): SidebarListItem => ({ kind: "marker", marker });
   const groupKey = "branch:env:proj:main";
-  // Pinned p1 | Active a0 [group m1 m2] | Settled s1
+  // Pinned p1 | Active a0 [group m1 m2] a1 a2 | Settled s1
   const items: readonly SidebarListItem[] = [
     marker("pinned-header"),
     thread("p1", "pinned"),
@@ -1466,6 +1466,8 @@ describe("resolveSidebarGroupDropTarget", () => {
     { kind: "branch-header", groupKey },
     thread("m1", "active"),
     thread("m2", "active"),
+    thread("a1", "active"),
+    thread("a2", "active"),
     marker("settled-header"),
     thread("s1", "settled"),
   ];
@@ -1476,7 +1478,23 @@ describe("resolveSidebarGroupDropTarget", () => {
     expect(resolve("a0")).toEqual({
       section: "active",
       pinnedOrder: ["p1"],
-      activeOrder: ["m1", "m2", "a0"],
+      activeOrder: ["m1", "m2", "a0", "a1", "a2"],
+    });
+  });
+
+  it("moves the whole block below the next standalone active row", () => {
+    expect(resolve("a1")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["a0", "a1", "m1", "m2", "a2"],
+    });
+  });
+
+  it("moves the whole block below a later standalone active row", () => {
+    expect(resolve("a2")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["a0", "a1", "a2", "m1", "m2"],
     });
   });
 
@@ -1484,7 +1502,7 @@ describe("resolveSidebarGroupDropTarget", () => {
     expect(resolve("p1")).toEqual({
       section: "pinned",
       pinnedOrder: ["m1", "m2", "p1"],
-      activeOrder: ["a0"],
+      activeOrder: ["a0", "a1", "a2"],
     });
   });
 
@@ -1492,7 +1510,8 @@ describe("resolveSidebarGroupDropTarget", () => {
     expect(resolve("s1")?.section).toBe("settled");
   });
 
-  it("is a no-op when dropping on the group's own rows or header", () => {
+  it("is a no-op when the target is unknown or belongs to the lifted group", () => {
+    expect(resolve("missing")).toBeNull();
     expect(resolve("m1")).toBeNull();
     expect(resolve(sidebarBranchHeaderId(groupKey))).toBeNull();
   });

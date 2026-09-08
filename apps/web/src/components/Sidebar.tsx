@@ -254,6 +254,7 @@ const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const EXPANDED_BRANCH_GROUPS_KEY = "t3code:sidebar:expanded-branch-groups";
 const expandedBranchGroupsSchema = Schema.Array(Schema.String);
+const DEFAULT_EXPANDED_BRANCH_GROUPS: string[] = [];
 
 const BRANCH_STATUS_PRESENTATION: Record<
   SidebarBranchStatus,
@@ -2909,7 +2910,7 @@ export default function Sidebar() {
   }, [activeThreads]);
   const [expandedBranchGroups, setExpandedBranchGroups] = useLocalStorage(
     EXPANDED_BRANCH_GROUPS_KEY,
-    [] as string[],
+    DEFAULT_EXPANDED_BRANCH_GROUPS,
     expandedBranchGroupsSchema,
   );
   const expandedBranchGroupKeys = useMemo(

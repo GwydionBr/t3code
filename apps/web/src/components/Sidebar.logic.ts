@@ -493,18 +493,22 @@ export function resolveSidebarGroupDropTarget(
   const isMoving = (item: SidebarListItem) =>
     (item.kind === "thread" && memberSet.has(item.key)) ||
     (item.kind === "branch-header" && item.groupKey === groupKey);
+  const firstMovingIndex = items.findIndex(isMoving);
+  const originalOverIndex = items.findIndex((item) => sidebarListItemId(item) === overId);
   const reduced = items.filter((item) => !isMoving(item));
-  const overIndex = reduced.findIndex((item) => sidebarListItemId(item) === overId);
+  const reducedOverIndex = reduced.findIndex((item) => sidebarListItemId(item) === overId);
   // overId is unknown, or it is one of the lifted rows — a no-op either way.
-  if (overIndex === -1) return null;
+  if (reducedOverIndex === -1) return null;
+  const insertionIndex =
+    originalOverIndex > firstMovingIndex ? reducedOverIndex + 1 : reducedOverIndex;
   const block: SidebarListItem[] = memberKeys.map((key) => ({
     kind: "thread",
     key,
     section: "active",
   }));
   const moved = [...reduced];
-  moved.splice(overIndex, 0, ...block);
-  return sidebarDropTargetFromItems(moved, overIndex);
+  moved.splice(insertionIndex, 0, ...block);
+  return sidebarDropTargetFromItems(moved, insertionIndex);
 }
 
 /** A whole-group move: the block stays together and either reorders within the
