@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
   DndContext,
+  DragOverlay,
   useSensor,
   useSensors,
   type DraggableSyntheticListeners,
@@ -756,11 +757,50 @@ function SortableSidebarBranchHeader(props: {
         transform: CSS.Translate.toString(transform),
         transition,
         visibility: transform?.scaleY === 0 ? "hidden" : undefined,
-        ...(isDragging ? { position: "relative", zIndex: 1 } : null),
+        // The lifted block rides in a DragOverlay (see SidebarBranchGroupDragPreview),
+        // so fade the in-place lid to an empty slot rather than showing it twice.
+        ...(isDragging ? { position: "relative", zIndex: 1, opacity: 0 } : null),
       }}
     >
       {props.children(listeners)}
     </li>
+  );
+}
+
+// The floating preview that rides the cursor while a branch group is dragged.
+// Renders the whole box — the header lid plus a compact row per member thread —
+// so the drag item reads as the entire group moving as a unit (ADR 0001), not
+// just its header. The source rows fade to ghosts (groupDragGhost) so the block
+// looks lifted out rather than duplicated. The DragOverlay pins the preview to
+// the source header's width, so it stays column-aligned.
+function SidebarBranchGroupDragPreview({
+  branchLabel,
+  threads,
+}: {
+  readonly branchLabel: string;
+  readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+}) {
+  return (
+    <div className="overflow-hidden rounded-md border border-primary/40 bg-primary/10 shadow-lg shadow-black/25">
+      <div className="flex min-h-7 items-center gap-1.5 px-2.5 text-[11px] font-medium text-sidebar-foreground">
+        <ChevronDownIcon aria-hidden className="size-3 shrink-0" />
+        <GitBranchIcon aria-hidden className="size-3.5 shrink-0 text-sidebar-muted-foreground/70" />
+        <span className="min-w-0 truncate">{branchLabel}</span>
+        <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/80">
+          {threads.length}
+        </span>
+      </div>
+      <div className="bg-primary/[0.06] px-1.5 pb-1">
+        {threads.map((thread) => (
+          <div
+            key={`${thread.environmentId}:${thread.id}`}
+            className="flex min-h-8 items-center rounded-sm px-1.5 text-[13px] text-sidebar-foreground"
+          >
+            <span className="min-w-0 truncate">{thread.title}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1155,6 +1195,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // left/right edges; "member-last" also closes the bottom. Null for standalone
   // rows. The branch header draws the box's top edge.
   branchGroupEdge?: "member" | "member-last" | null;
+  // True while this row's branch group is being dragged by its header: the
+  // lifted block rides in the DragOverlay, so the source row fades to a ghost
+  // placeholder rather than looking left behind.
+  groupDragGhost?: boolean;
   // Slim rows are either settled (action: un-settle) or merely quiet
   // (seen Ready threads — action: settle).
   variantAction: "settle" | "unsettle" | "unsnooze";
@@ -1778,6 +1822,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
           branchGroupClassName,
           sortable?.isDragging && "relative z-20",
+          props.groupDragGhost && "opacity-35",
         )}
       >
         <Tooltip disabled={sortable?.isDragging}>
@@ -1932,6 +1977,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
         branchGroupClassName,
         sortable?.isDragging && "relative z-20",
+        props.groupDragGhost && "opacity-35",
       )}
     >
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
@@ -5352,6 +5398,10 @@ export default function Sidebar() {
                             thread={thread}
                             variant={rowVariant}
                             branchGroupEdge={branchGroupRowEdges.get(threadKey) ?? null}
+                            groupDragGhost={
+                              draggedGroupKey !== null &&
+                              activeBranchKeyById.get(threadKey) === draggedGroupKey
+                            }
                             // Snoozed rows wake, settled rows un-settle, and cards settle.
                             variantAction={
                               section === "snoozed"
@@ -5637,6 +5687,20 @@ export default function Sidebar() {
                     ) : null}
                   </ul>
                 </SortableContext>
+                <DragOverlay modifiers={[restrictToVerticalAxis]} dropAnimation={null}>
+                  {(() => {
+                    const groupKey = dragState?.activeGroupKey ?? null;
+                    if (groupKey === null) return null;
+                    const group = branchGroupByKey.get(groupKey);
+                    if (group === undefined) return null;
+                    return (
+                      <SidebarBranchGroupDragPreview
+                        branchLabel={group.branch}
+                        threads={group.threads}
+                      />
+                    );
+                  })()}
+                </DragOverlay>
               </DndContext>
             </TooltipProvider>
           ) : null}
