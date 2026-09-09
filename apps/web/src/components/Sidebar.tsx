@@ -666,7 +666,12 @@ function SidebarBranchGroupHeader({
   const groupSize = groupThreads.length;
 
   return (
-    <div className="px-1.5">
+    // Top edge and lid of the branch box: rounded top, side borders, and a
+    // stronger accent fill that the member rows continue downward (see
+    // branchGroupClassName) at a lighter tint. No bottom border, so the frame
+    // reads as one box. Colors come from the themeable primary/accent token, so
+    // the box stands out in the user's palette.
+    <div className="rounded-t-md border border-b-0 border-primary/40 bg-primary/10 px-1 pt-0.5">
       <Tooltip>
         <TooltipTrigger
           render={
@@ -1136,6 +1141,10 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
   variant: "card" | "slim";
+  // Set on rows inside a multi-thread branch group so the row draws the group's
+  // left/right edges; "member-last" also closes the bottom. Null for standalone
+  // rows. The branch header draws the box's top edge.
+  branchGroupEdge?: "member" | "member-last" | null;
   // Slim rows are either settled (action: un-settle) or merely quiet
   // (seen Ready threads — action: settle).
   variantAction: "settle" | "unsettle" | "unsnooze";
@@ -1583,6 +1592,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     props.sortable?.isDragging &&
       "bg-[linear-gradient(var(--sidebar-row-active),var(--sidebar-row-active)),linear-gradient(var(--sidebar),var(--sidebar))] text-sidebar-foreground opacity-100 shadow-lg",
   );
+  // A grouped row draws the branch box's vertical edges. The -mt-px closes the
+  // list's 1px gap so the header's and members' side borders meet as one frame,
+  // and the last member rounds off and caps the bottom. Border and fill use the
+  // themeable primary/accent token, so the box stands out in the user's palette.
+  const branchGroupClassName = props.branchGroupEdge
+    ? cn(
+        "-mt-px border-x border-primary/40 bg-primary/[0.06]",
+        props.branchGroupEdge === "member-last" && "rounded-b-md border-b pb-1",
+      )
+    : null;
   // dnd-kit props for the row root. Same bag on both variants: every row in
   // the list translates around the gap as the drag passes it.
   const sortable = props.sortable;
@@ -1747,6 +1766,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         className={cn(
           // Matches the h-9 row so unrendered rows never shift the list when they paint.
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
+          branchGroupClassName,
           sortable?.isDragging && "relative z-20",
         )}
       >
@@ -1900,6 +1920,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       className={cn(
         // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
+        branchGroupClassName,
         sortable?.isDragging && "relative z-20",
       )}
     >
@@ -3598,6 +3619,25 @@ export default function Sidebar() {
     snoozedThreads.length,
     visibleSnoozedThreads,
   ]);
+  // Which visible active rows belong to a multi-thread branch group, and which
+  // one closes it. Drives the group's bounding box: the header draws the top
+  // edge, member rows the sides, and the last visible member the bottom edge.
+  const branchGroupRowEdges = useMemo((): ReadonlyMap<string, "member" | "member-last"> => {
+    const edges = new Map<string, "member" | "member-last">();
+    for (const group of groupActiveThreadsByBranch(activeThreads)) {
+      const first = group.threads[0];
+      if (first === undefined || group.branch === null || group.threads.length === 1) continue;
+      const groupKey = activeThreadBranchGroupKey(first);
+      const visible = expandedBranchGroupKeys.has(groupKey)
+        ? group.threads
+        : group.threads.slice(0, 1);
+      visible.forEach((thread, index) => {
+        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        edges.set(key, index === visible.length - 1 ? "member-last" : "member");
+      });
+    }
+    return edges;
+  }, [activeThreads, expandedBranchGroupKeys]);
   useEffect(() => {
     // Cancel a drag whose lifted item left the list (e.g. a thread archived, or
     // a branch group dissolved, mid-drag). The dragged id is a thread key or a
@@ -5107,6 +5147,7 @@ export default function Sidebar() {
                             key={`${threadKey}:${rowVariant}`}
                             thread={thread}
                             variant={rowVariant}
+                            branchGroupEdge={branchGroupRowEdges.get(threadKey) ?? null}
                             // Snoozed rows wake, settled rows un-settle, and cards settle.
                             variantAction={
                               section === "snoozed"
