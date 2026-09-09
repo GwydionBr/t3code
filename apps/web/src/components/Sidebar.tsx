@@ -640,6 +640,7 @@ function SidebarBranchGroupHeader({
   projectLabel,
   branchContextLabel,
   onToggleExpanded,
+  onContextMenu,
   dragListeners,
 }: {
   readonly groupKey: string;
@@ -649,6 +650,9 @@ function SidebarBranchGroupHeader({
   readonly projectLabel: string | null;
   readonly branchContextLabel: string;
   readonly onToggleExpanded: (groupKey: string, expanded: boolean) => void;
+  /** Right-click on the header opens the group-wide action menu (new thread on
+      the branch, settle/snooze the whole group). */
+  readonly onContextMenu: (position: { x: number; y: number }) => void;
   /** dnd-kit activator listeners, or undefined when the group cannot be
       dragged (e.g. a server without active reordering). */
   readonly dragListeners: DraggableSyntheticListeners;
@@ -671,7 +675,13 @@ function SidebarBranchGroupHeader({
     // branchGroupClassName) at a lighter tint. No bottom border, so the frame
     // reads as one box. Colors come from the themeable primary/accent token, so
     // the box stands out in the user's palette.
-    <div className="rounded-t-md border border-b-0 border-primary/40 bg-primary/10 px-1 pt-0.5">
+    <div
+      className="rounded-t-md border border-b-0 border-primary/40 bg-primary/10 px-1 pt-0.5"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <Tooltip>
         <TooltipTrigger
           render={
@@ -4681,6 +4691,200 @@ export default function Sidebar() {
     ],
   );
 
+  // Right-click on a branch group header: the group-wide slice of the per-thread
+  // menu. A branch group is one environment/project/branch (see the group key),
+  // so every member shares capabilities and the new-thread context — all read
+  // off the lead thread. Bulk settle/snooze mirror the multi-select menu; the
+  // only extra is "New thread on branch", which carries the group's worktree.
+  const handleBranchGroupContextMenu = useCallback(
+    (groupThreads: ReadonlyArray<EnvironmentThreadShell>, position: { x: number; y: number }) => {
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) return;
+        const lead = groupThreads[0];
+        if (!lead) return;
+        const count = groupThreads.length;
+        const caps = serverConfigs.get(lead.environmentId)?.environment.capabilities;
+        const supportsSettlement = caps?.threadSettlement === true;
+        const supportsSnooze = caps?.threadSnooze === true;
+        const hasBranch = lead.branch != null;
+        const now = new Date();
+        // Snooze (N) only when every member can take it right now — a mixed
+        // group with blocked-on-you work would half-apply, same rule as the
+        // multi-select menu.
+        const canSnoozeGroup =
+          supportsSnooze &&
+          groupThreads.every((thread) => canSnooze(thread, { now: now.toISOString() }));
+        const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+        const groupKeys = new Set(
+          groupThreads.map((thread) =>
+            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+          ),
+        );
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(
+            [
+              ...(hasBranch
+                ? [
+                    {
+                      id: "new-thread-on-branch",
+                      label: `New thread on ${lead.branch}`,
+                      icon: "message-square-plus",
+                    },
+                  ]
+                : []),
+              ...(supportsSettlement
+                ? [
+                    {
+                      id: "settle",
+                      label: `Settle all (${count})`,
+                      icon: "circle-check",
+                      separatorBefore: hasBranch,
+                    },
+                  ]
+                : []),
+              ...(canSnoozeGroup
+                ? [
+                    {
+                      id: "snooze",
+                      label: `Snooze all (${count})`,
+                      icon: "clock",
+                      separatorBefore: hasBranch && !supportsSettlement,
+                      children: snoozePresets.map((preset) => ({
+                        id: `snooze:${preset.id}`,
+                        label: `${preset.label} (${preset.whenLabel})`,
+                      })),
+                    },
+                  ]
+                : []),
+              {
+                id: "mark-unread",
+                label: `Mark all unread (${count})`,
+                icon: "mail-open",
+                separatorBefore: true,
+              },
+            ],
+            position,
+          ),
+        );
+        if (clicked._tag === "Failure") return;
+        if (clicked.value?.startsWith("snooze:")) {
+          const preset = snoozePresets.find(
+            (candidate) => `snooze:${candidate.id}` === clicked.value,
+          );
+          if (!preset) return;
+          // Post-snooze navigation must skip the whole group — they leave the
+          // card block together.
+          const outcomes = await Promise.all(
+            groupThreads.map(async (thread) => {
+              const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+              const outcome = await performSnooze(threadRef, preset, {
+                coSnoozingKeys: groupKeys,
+              });
+              return { outcome, threadRef };
+            }),
+          );
+          const snoozedThreadRefs = outcomes.flatMap(({ outcome, threadRef }) =>
+            outcome.status === "success" ? [threadRef] : [],
+          );
+          const failures = outcomes.flatMap(({ outcome }) =>
+            outcome.status === "failure" ? [outcome.error] : [],
+          );
+          if (snoozedThreadRefs.length > 0) {
+            const snoozedCount = snoozedThreadRefs.length;
+            const failedCount = failures.length;
+            toastManager.add(
+              stackedThreadToast({
+                type: failedCount > 0 ? "warning" : "success",
+                title:
+                  failedCount > 0
+                    ? `Snoozed ${snoozedCount} of ${count} threads`
+                    : `Snoozed ${snoozedCount} thread${snoozedCount === 1 ? "" : "s"}`,
+                description:
+                  failedCount > 0
+                    ? `${failedCount} thread${failedCount === 1 ? "" : "s"} couldn't be snoozed.`
+                    : undefined,
+                timeout: 5_000,
+                actionProps: {
+                  children: "Undo",
+                  onClick: () => {
+                    for (const threadRef of snoozedThreadRefs) attemptUnsnooze(threadRef);
+                  },
+                },
+              }),
+            );
+          } else if (failures.length > 0) {
+            const firstError = failures[0];
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Failed to snooze threads",
+                description:
+                  firstError instanceof Error ? firstError.message : "An error occurred.",
+              }),
+            );
+          }
+          return;
+        }
+        switch (clicked.value) {
+          case "new-thread-on-branch": {
+            // Explicit branch carry-over: reuse the group's worktree when it has
+            // one, otherwise its branch on the local checkout.
+            const result = await settlePromise(() =>
+              handleNewThreadRef.current(scopeProjectRef(lead.environmentId, lead.projectId), {
+                branch: lead.branch,
+                worktreePath: lead.worktreePath,
+                envMode: lead.worktreePath ? "worktree" : "local",
+                startFromOrigin: false,
+              }),
+            );
+            if (result._tag === "Failure") {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Could not create thread",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
+          case "settle": {
+            // Skip rows already explicitly settled; co-settling keys let the
+            // open thread's forward navigation skip the whole group.
+            for (const thread of groupThreads) {
+              if (thread.settledOverride === "settled") continue;
+              attemptSettle(scopeThreadRef(thread.environmentId, thread.id), {
+                coSettlingKeys: groupKeys,
+              });
+            }
+            return;
+          }
+          case "mark-unread": {
+            for (const thread of groupThreads) {
+              markThreadUnread(
+                scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+                thread.latestTurn?.completedAt,
+              );
+            }
+            return;
+          }
+          default:
+            return;
+        }
+      })();
+    },
+    [
+      attemptSettle,
+      attemptUnsnooze,
+      markThreadUnread,
+      performSnooze,
+      serverConfigs,
+      timestampFormat,
+    ],
+  );
+
   // Thread jump (cmd+1..9) and prev/next traversal reuse the same commands as
   // v1 — the keybinding layer is shared, only the ordered list differs.
   const routeTerminalOpen = useTerminalUiStateStore((state) =>
@@ -5310,6 +5514,9 @@ export default function Sidebar() {
                                       : group.branch
                                   }
                                   onToggleExpanded={setBranchGroupExpanded}
+                                  onContextMenu={(position) =>
+                                    handleBranchGroupContextMenu(group.threads, position)
+                                  }
                                   dragListeners={dragListeners}
                                 />
                               )}
