@@ -325,33 +325,6 @@ function sameOrder(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
-/** The branch groups that render expanded, combining the user's remembered
-    expand choices with a temporary auto-expand of the group holding the open
-    thread — so the active thread is never hidden behind a collapsed header.
-
-    The auto-expand is a convenience, not a cage: it never persists, and a
-    manual collapse of that same group wins over it (`autoExpandSuppressedGroupKey`).
-    The suppression is keyed to the active group, so it lapses on its own once
-    the open thread moves to another group and the auto-expand stops applying. */
-export function resolveEffectiveExpandedBranchGroups(input: {
-  /** Persisted manual-expand set; groups absent from it render collapsed. */
-  readonly expandedGroupKeys: ReadonlySet<string>;
-  /** Group key of the open thread, only when it sits in a headered group. */
-  readonly activeThreadGroupKey: string | null;
-  /** Group the user manually collapsed while it held the open thread. */
-  readonly autoExpandSuppressedGroupKey: string | null;
-}): ReadonlySet<string> {
-  const { expandedGroupKeys, activeThreadGroupKey, autoExpandSuppressedGroupKey } = input;
-  if (
-    activeThreadGroupKey === null ||
-    expandedGroupKeys.has(activeThreadGroupKey) ||
-    autoExpandSuppressedGroupKey === activeThreadGroupKey
-  ) {
-    return expandedGroupKeys;
-  }
-  return new Set(expandedGroupKeys).add(activeThreadGroupKey);
-}
-
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
   readonly activeSection: SidebarSection;

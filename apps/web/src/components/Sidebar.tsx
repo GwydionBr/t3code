@@ -165,7 +165,6 @@ import {
   planSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
-  resolveEffectiveExpandedBranchGroups,
   resolveSidebarBranchStatusSummary,
   resolveSidebarDropTarget,
   resolveSidebarGroupDropTarget,
@@ -2864,7 +2863,7 @@ export default function Sidebar() {
   // Branch-group maps: `activeBranchKeyById` keys every active thread to its
   // group (singletons get a unique key) so a drop that would split a group is
   // rejected; `activeBranchHeaderByKey` covers only headered groups so the drag
-  // preview can re-emit their headers and the open thread's group auto-expands.
+  // preview can re-emit their headers.
   const { activeBranchKeyById, activeBranchHeaderByKey, branchGroupByKey } = useMemo(() => {
     const branchKey = new Map<string, string>();
     const headerKey = new Map<string, string>();
@@ -2899,30 +2898,6 @@ export default function Sidebar() {
     () => new Set(expandedBranchGroups),
     [expandedBranchGroups],
   );
-  // The group holding the open thread, only when it is a headered (>1 thread)
-  // group: that group auto-expands so the active row is never hidden.
-  const activeThreadGroupKey =
-    routeThreadKey !== null ? (activeBranchHeaderByKey.get(routeThreadKey) ?? null) : null;
-  // A manual collapse of the auto-expanded active group wins over the
-  // auto-expand. Ephemeral (never persisted) and keyed to the active group, so
-  // it lapses on its own once the open thread moves to a different group.
-  const [autoExpandSuppressedGroupKey, setAutoExpandSuppressedGroupKey] = useState<string | null>(
-    null,
-  );
-  useEffect(() => {
-    setAutoExpandSuppressedGroupKey((current) =>
-      current === null || current === activeThreadGroupKey ? current : null,
-    );
-  }, [activeThreadGroupKey]);
-  const effectiveExpandedBranchGroupKeys = useMemo(
-    () =>
-      resolveEffectiveExpandedBranchGroups({
-        expandedGroupKeys: expandedBranchGroupKeys,
-        activeThreadGroupKey,
-        autoExpandSuppressedGroupKey,
-      }),
-    [activeThreadGroupKey, autoExpandSuppressedGroupKey, expandedBranchGroupKeys],
-  );
   const setBranchGroupExpanded = useCallback(
     (groupKey: string, expanded: boolean) => {
       setExpandedBranchGroups((current) =>
@@ -2932,13 +2907,8 @@ export default function Sidebar() {
             : [...current, groupKey]
           : current.filter((candidate) => candidate !== groupKey),
       );
-      // Collapsing the group that the open thread lives in is an explicit
-      // choice that must beat auto-expand; expanding it clears any suppression.
-      if (groupKey === activeThreadGroupKey) {
-        setAutoExpandSuppressedGroupKey(expanded ? null : groupKey);
-      }
     },
-    [activeThreadGroupKey, setExpandedBranchGroups],
+    [setExpandedBranchGroups],
   );
   const renderedSettledThreads = useMemo(() => {
     if (settledShelfExpanded) return visibleSettledThreads;
@@ -3606,10 +3576,7 @@ export default function Sidebar() {
       }
       const groupKey = activeThreadBranchGroupKey(first);
       items.push({ kind: "branch-header", groupKey });
-      // The group holding the open thread auto-expands (see
-      // effectiveExpandedBranchGroupKeys), so a collapsed group is never the
-      // one hiding the deep-linked row — it folds down to its lead row alone.
-      const expanded = effectiveExpandedBranchGroupKeys.has(groupKey);
+      const expanded = expandedBranchGroupKeys.has(groupKey);
       const visibleThreads = expanded ? group.threads : group.threads.slice(0, 1);
       items.push(...rowsOf(visibleThreads, "active"));
     }
@@ -3624,7 +3591,7 @@ export default function Sidebar() {
     return items;
   }, [
     activeThreads,
-    effectiveExpandedBranchGroupKeys,
+    expandedBranchGroupKeys,
     pinnedThreads,
     renderedSettledThreads,
     settledThreads.length,
@@ -5293,9 +5260,7 @@ export default function Sidebar() {
                                 <SidebarBranchGroupHeader
                                   groupKey={item.groupKey}
                                   groupThreads={group.threads}
-                                  groupExpanded={effectiveExpandedBranchGroupKeys.has(
-                                    item.groupKey,
-                                  )}
+                                  groupExpanded={expandedBranchGroupKeys.has(item.groupKey)}
                                   branchLabel={group.branch}
                                   projectLabel={projectLabel}
                                   branchContextLabel={

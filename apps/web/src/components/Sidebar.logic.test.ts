@@ -4,7 +4,6 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import {
   activeOrderKeepsBranchGroupsContiguous,
-  resolveEffectiveExpandedBranchGroups,
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
   archiveSelectedThreadEntries,
@@ -1649,63 +1648,6 @@ describe("planSidebarGroupDrop", () => {
     expect(result.kind).toBe("reorder-active-group");
     if (result.kind !== "reorder-active-group") return;
     expect(result.assignments.map((entry) => entry.id)).toEqual(["m1"]);
-  });
-});
-
-describe("resolveEffectiveExpandedBranchGroups", () => {
-  it("returns the remembered set unchanged when no group holds the open thread", () => {
-    const expanded = new Set(["gX"]);
-    expect(
-      resolveEffectiveExpandedBranchGroups({
-        expandedGroupKeys: expanded,
-        activeThreadGroupKey: null,
-        autoExpandSuppressedGroupKey: null,
-      }),
-    ).toBe(expanded);
-  });
-
-  it("auto-expands the group holding the open thread", () => {
-    expect([
-      ...resolveEffectiveExpandedBranchGroups({
-        expandedGroupKeys: new Set(["gX"]),
-        activeThreadGroupKey: "gY",
-        autoExpandSuppressedGroupKey: null,
-      }),
-    ]).toEqual(["gX", "gY"]);
-  });
-
-  it("leaves an already-remembered active group untouched", () => {
-    const expanded = new Set(["gY"]);
-    expect(
-      resolveEffectiveExpandedBranchGroups({
-        expandedGroupKeys: expanded,
-        activeThreadGroupKey: "gY",
-        autoExpandSuppressedGroupKey: null,
-      }),
-    ).toBe(expanded);
-  });
-
-  it("lets a manual collapse of the active group win over auto-expand", () => {
-    const expanded = new Set<string>();
-    expect(
-      resolveEffectiveExpandedBranchGroups({
-        expandedGroupKeys: expanded,
-        activeThreadGroupKey: "gY",
-        autoExpandSuppressedGroupKey: "gY",
-      }),
-    ).toBe(expanded);
-  });
-
-  it("still auto-expands when the suppression belongs to a different group", () => {
-    // A suppression left over from a group the open thread has since left must
-    // not block auto-expand of the group it is in now.
-    expect([
-      ...resolveEffectiveExpandedBranchGroups({
-        expandedGroupKeys: new Set<string>(),
-        activeThreadGroupKey: "gY",
-        autoExpandSuppressedGroupKey: "gX",
-      }),
-    ]).toEqual(["gY"]);
   });
 });
 
