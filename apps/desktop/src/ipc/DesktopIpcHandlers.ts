@@ -36,7 +36,6 @@ import {
   getLocalEnvironmentBootstraps,
   getLocalEnvironmentBearerToken,
   getSystemLocale,
-  getWindowFocusState,
   getWindowFullscreenState,
   openExternal,
   openSystemSettings,
@@ -46,7 +45,6 @@ import {
   pickThemeFiles,
   setTheme,
   showContextMenu,
-  showNotification,
 } from "./methods/window.ts";
 import {
   acknowledgeSnapShot,
@@ -76,8 +74,6 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleSync(getAppBranding);
   yield* ipc.handleSync(getSystemLocale);
   yield* ipc.handleSync(getWindowFullscreenState);
-  yield* ipc.handleSync(getWindowFocusState);
-  yield* ipc.handle(showNotification);
   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
 

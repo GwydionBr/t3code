@@ -271,26 +271,6 @@ export const LoadBalancingWeights = Schema.Record(
   Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
 );
 
-/**
- * Desktop-only native notifications. Raised when a thread reaches a watched
- * agent-awareness phase while the app window is unfocused. `enabled` is the
- * master switch; the four per-moment toggles map to the awareness phases
- * `waiting_for_approval`, `waiting_for_input`, `completed`, and `failed`.
- * `finished` (completed) defaults off as the noisiest category. Client-local:
- * never synced to the server, and ignored on web and mobile.
- */
-export const DesktopNotificationSettingsSchema = Schema.Struct({
-  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  approvalNeeded: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  inputNeeded: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  finished: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  failed: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-});
-export type DesktopNotificationSettings = typeof DesktopNotificationSettingsSchema.Type;
-export const DEFAULT_DESKTOP_NOTIFICATION_SETTINGS: DesktopNotificationSettings = Schema.decodeSync(
-  DesktopNotificationSettingsSchema,
-)({});
-
 export const ClientSettingsSchema = Schema.Struct({
   loadBalancingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   loadBalancingWeights: LoadBalancingWeights.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -466,9 +446,6 @@ export const ClientSettingsSchema = Schema.Struct({
   snapShotFlash: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   snapShotAnimations: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  desktopNotifications: DesktopNotificationSettingsSchema.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_DESKTOP_NOTIFICATION_SETTINGS)),
-  ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -1394,6 +1371,5 @@ export const ClientSettingsPatch = Schema.Struct({
   snapShotFlash: Schema.optionalKey(Schema.Boolean),
   snapShotAnimations: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
-  desktopNotifications: Schema.optionalKey(DesktopNotificationSettingsSchema),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

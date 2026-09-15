@@ -67,13 +67,6 @@ const clientSettings: ClientSettings = {
   pullRequestMergeMethodOverrides: {},
   timestampFormat: "24-hour",
   wordWrap: true,
-  desktopNotifications: {
-    enabled: true,
-    approvalNeeded: true,
-    inputNeeded: true,
-    finished: false,
-    failed: true,
-  },
 };
 
 const decodeClientSettingsJson = Schema.decodeEffect(Schema.fromJsonString(ClientSettingsSchema));
