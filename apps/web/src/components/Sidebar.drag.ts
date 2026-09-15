@@ -122,11 +122,49 @@ export function createSidebarSortingStrategy(input: {
   }: Layout): ReturnType<SortingStrategy>[] | null {
     const active = items[activeIndex];
     const over = items[overIndex] ?? active;
-    // A branch-group header drag moves the whole block; the thread-row
-    // projection does not model that, so fall back to the default reflow
-    // (null) rather than freezing every row. Block-drag preview polish is
-    // tracked separately and verified in a browser.
-    if (active?.kind === "branch-header") return null;
+    // A branch-group header drag lifts the whole block (header + its visible
+    // member rows) into the DragOverlay. Project the block as one contiguous
+    // unit so the surrounding rows reflow around a block-sized gap, exactly like
+    // a single row: the source slot closes and a block-tall gap opens at the
+    // hovered target. The lifted rows themselves are hidden (the overlay shows
+    // them). EXPERIMENTAL — verified in a browser, not by the strategy tests.
+    if (active?.kind === "branch-header") {
+      if (!rects[activeIndex]) return null;
+      // The block is the header followed by the contiguous active member rows
+      // that map back to this group.
+      let blockEnd = activeIndex;
+      for (let i = activeIndex + 1; i < items.length; i++) {
+        const item = items[i];
+        if (
+          item?.kind === "thread" &&
+          input.activeBranchHeaderByKey?.get(item.key) === active.groupKey
+        ) {
+          blockEnd = i;
+        } else break;
+      }
+      const blockTop = rects[activeIndex]!.top;
+      const blockBottom = rects[blockEnd]?.bottom;
+      if (blockBottom === undefined) return null;
+      const blockHeight = blockBottom - blockTop + 1;
+      const result = items.map(() => stationary);
+      for (let i = activeIndex; i <= blockEnd; i++) result[i] = hidden;
+      // overIndex === -1 means no legal target under the cursor: hold the list
+      // still (only the block is lifted out) rather than reflowing to nowhere.
+      if (overIndex >= 0 && (overIndex < activeIndex || overIndex > blockEnd)) {
+        if (overIndex > blockEnd) {
+          // Dragging down: rows between the block and the target slide up into
+          // the vacated slot; the block will land just below them.
+          for (let i = blockEnd + 1; i <= overIndex; i++)
+            result[i] = { ...stationary, y: -blockHeight };
+        } else {
+          // Dragging up: rows from the target down to the block slide down to
+          // open the landing gap above them.
+          for (let i = overIndex; i < activeIndex; i++)
+            result[i] = { ...stationary, y: blockHeight };
+        }
+      }
+      return result;
+    }
     if (active?.kind !== "thread" || !over || !rects[0]) return [];
     const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
     if (!target) return [];

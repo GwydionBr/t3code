@@ -868,17 +868,32 @@ describe("branch group headers in the sorting preview", () => {
     expect(result.get(sidebarBranchHeaderId(groupKey))?.scaleY).toBe(1);
   });
 
-  it("reflows with the default strategy while the header itself is dragged", () => {
-    // The block-move projection is not modelled here, so a header drag must
-    // fall back to the default vertical reflow rather than freezing every row.
-    const strategy = createSidebarSortingStrategy({
-      items,
-      settledOrder: [],
-      settledExpanded: true,
-    });
-    const args = layout(items, sidebarBranchHeaderId(groupKey), "a2");
-    for (let index = 0; index < items.length; index += 1) {
-      expect(strategy({ ...args, index })).toEqual(verticalListSortingStrategy({ ...args, index }));
-    }
+  it("lifts the whole branch block out and reflows the rest while its header is dragged", () => {
+    // Dragging the header lifts the entire block (header + its member rows) into
+    // the DragOverlay: those rows collapse to the zero-scaleY hide, and the rows
+    // below slide up by the block's height so the vacated slot closes — the same
+    // dynamic reflow a single row gets, not a frozen gap.
+    const result = preview(
+      {
+        items,
+        settledOrder: [],
+        settledExpanded: true,
+        activeBranchHeaderByKey: new Map([
+          ["a1", groupKey],
+          ["a2", groupKey],
+        ]),
+      },
+      sidebarBranchHeaderId(groupKey),
+      sidebarMarkerId("settled-header"),
+    );
+    // The lifted block hides in place; the overlay carries it under the cursor.
+    expect(result.get(sidebarBranchHeaderId(groupKey))?.scaleY).toBe(0);
+    expect(result.get("a1")?.scaleY).toBe(0);
+    expect(result.get("a2")?.scaleY).toBe(0);
+    // The shelf below slides up by the block's measured height (28+82+82 rows
+    // plus the 1px gaps between them = 195) to close the source slot.
+    expect(result.get(sidebarMarkerId("settled-header"))).toEqual({ ...stationary, y: -195 });
+    // Rows above the block hold still.
+    expect(result.get(sidebarMarkerId("pinned-header"))).toEqual(stationary);
   });
 });
