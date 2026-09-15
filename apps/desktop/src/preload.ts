@@ -9,7 +9,6 @@ import { exposeClerkBridge } from "@clerk/electron/preload";
 import { contextBridge, ipcRenderer } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
-import { subscribeWindowFocusState } from "./ipc/windowFocusSubscription.ts";
 
 const SNAP_SHOT_EVENT_TYPES = new Set([
   "requested",
@@ -214,7 +213,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   },
   getWindowFocusState: () =>
     ipcRenderer.sendSync(IpcChannels.GET_WINDOW_FOCUS_STATE_CHANNEL) === true,
-  subscribeWindowFocusState: (listener) => subscribeWindowFocusState(ipcRenderer, listener),
   onWindowFocusStateChange: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, focused: unknown) => {
       if (typeof focused !== "boolean") return;
