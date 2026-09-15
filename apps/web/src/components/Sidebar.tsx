@@ -811,24 +811,32 @@ function SidebarBranchGroupDragPreview({
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
 }) {
   return (
-    <div className="overflow-hidden rounded-md border border-primary/40 bg-primary/10 shadow-lg shadow-black/25">
-      <div className="flex min-h-7 items-center gap-1.5 px-2.5 text-[11px] font-medium text-sidebar-foreground">
-        <ChevronDownIcon aria-hidden className="size-3 shrink-0" />
-        <GitBranchIcon aria-hidden className="size-3.5 shrink-0 text-sidebar-muted-foreground/70" />
-        <span className="min-w-0 truncate">{branchLabel}</span>
-        <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/80">
-          {threads.length}
-        </span>
-      </div>
-      <div className="bg-primary/[0.06] px-1.5 pb-1">
-        {threads.map((thread) => (
-          <div
-            key={`${thread.environmentId}:${thread.id}`}
-            className="flex min-h-8 items-center rounded-sm px-1.5 text-[13px] text-sidebar-foreground"
-          >
-            <span className="min-w-0 truncate">{thread.title}</span>
-          </div>
-        ))}
+    // Opaque sidebar base under the branch tint so the lifted block reads as a
+    // solid card like a single-row lift; rows beneath never show through the
+    // translucent branch fill as it rides the cursor.
+    <div className="overflow-hidden rounded-md bg-sidebar shadow-lg">
+      <div className="overflow-hidden rounded-md border border-primary/40 bg-primary/10">
+        <div className="flex min-h-7 items-center gap-1.5 px-2.5 text-[11px] font-medium text-sidebar-foreground">
+          <ChevronDownIcon aria-hidden className="size-3 shrink-0" />
+          <GitBranchIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-sidebar-muted-foreground/70"
+          />
+          <span className="min-w-0 truncate">{branchLabel}</span>
+          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/80">
+            {threads.length}
+          </span>
+        </div>
+        <div className="bg-primary/[0.06] px-1.5 pb-1">
+          {threads.map((thread) => (
+            <div
+              key={`${thread.environmentId}:${thread.id}`}
+              className="flex min-h-8 items-center rounded-sm px-1.5 text-[13px] text-sidebar-foreground"
+            >
+              <span className="min-w-0 truncate">{thread.title}</span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1229,8 +1237,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // rows. The branch header draws the box's top edge.
   branchGroupEdge?: "member" | "member-last" | null;
   // True while this row's branch group is being dragged by its header: the
-  // lifted block rides in the DragOverlay, so the source row fades to a ghost
-  // placeholder rather than looking left behind.
+  // lifted block rides in the DragOverlay, so the source row is hidden (like the
+  // header lid) and reads as an empty lifted-out slot, matching a single-row lift.
   groupDragGhost?: boolean;
   // Slim rows are either settled (action: un-settle) or merely quiet
   // (seen Ready threads — action: settle).
@@ -1859,7 +1867,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
           branchGroupClassName,
           sortable?.isDragging && "relative z-20",
-          props.groupDragGhost && "opacity-35",
+          props.groupDragGhost && "opacity-0",
         )}
       >
         <Tooltip disabled={sortable?.isDragging}>
@@ -5696,20 +5704,24 @@ export default function Sidebar() {
                     ) : null}
                   </ul>
                 </SortableContext>
-                <DragOverlay modifiers={[restrictToVerticalAxis]} dropAnimation={null}>
-                  {(() => {
-                    const groupKey = dragState?.activeGroupKey ?? null;
-                    if (groupKey === null) return null;
-                    const group = branchGroupByKey.get(groupKey);
-                    if (group === undefined) return null;
-                    return (
-                      <SidebarBranchGroupDragPreview
-                        branchLabel={group.branch}
-                        threads={group.threads}
-                      />
-                    );
-                  })()}
-                </DragOverlay>
+                {/* Only a branch-group drag rides in an overlay. Mounting the
+                    overlay flips dnd-kit's useDragOverlay true, which pins the
+                    drag source in place; a single thread row must instead lift
+                    and follow the pointer, so its overlay stays unmounted. */}
+                {draggedGroupKey !== null ? (
+                  <DragOverlay modifiers={[restrictToVerticalAxis]} dropAnimation={null}>
+                    {(() => {
+                      const group = branchGroupByKey.get(draggedGroupKey);
+                      if (group === undefined) return null;
+                      return (
+                        <SidebarBranchGroupDragPreview
+                          branchLabel={group.branch}
+                          threads={group.threads}
+                        />
+                      );
+                    })()}
+                  </DragOverlay>
+                ) : null}
               </DndContext>
             </TooltipProvider>
           ) : null}
