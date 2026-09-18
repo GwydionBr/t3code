@@ -283,15 +283,15 @@ const signDesktopLocal = Effect.fn("signDesktopLocal")(function* (input: {
 });
 
 const signDesktopLocalCli = Command.make("sign-desktop-local", {
-  arch: Flag.choice("arch", ["arm64", "x64"]).pipe(
+  arch: Flag.Literals("arch", ["arm64", "x64"]).pipe(
     Flag.withDescription("Target architecture (arm64 or x64)."),
     Flag.withDefault("arm64" as const),
   ),
-  skipBuild: Flag.boolean("skip-build").pipe(
+  skipBuild: Flag.Boolean("skip-build").pipe(
     Flag.withDescription("Reuse the newest DMG in release/ instead of rebuilding."),
     Flag.withDefault(false),
   ),
-  identity: Flag.string("identity").pipe(
+  identity: Flag.String("identity").pipe(
     Flag.withDescription("Signing identity name; auto-discovered from the keychain when omitted."),
     Flag.optional,
   ),
