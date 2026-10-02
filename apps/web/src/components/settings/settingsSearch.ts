@@ -342,6 +342,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["collapsed expanded collapse expand files pull request pr code tab"],
   },
   {
+    id: "default-diff-scope",
+    title: "Default diff scope",
+    to: "/settings/general",
+    searchTerms: ["working tree branch changes base compare unstaged open diff panel"],
+  },
+  {
     id: "diff-layout",
     title: "Diff layout",
     to: "/settings/general",
