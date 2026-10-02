@@ -23,6 +23,7 @@ import {
   DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
   DEFAULT_UNIFIED_SETTINGS,
   type ChatWidth,
+  type DiffDefaultScope,
   type DiffLayout,
   type EnvironmentIdentificationMode,
   MAX_APPEARANCE_CONTRAST,
@@ -207,6 +208,11 @@ const CHAT_WIDTH_LABELS: Record<ChatWidth, string> = {
 const DIFF_LAYOUT_LABELS: Record<DiffLayout, string> = {
   stacked: "Stacked",
   split: "Split",
+};
+
+const DIFF_DEFAULT_SCOPE_LABELS: Record<DiffDefaultScope, string> = {
+  unstaged: "Working tree",
+  branch: "Branch changes",
 };
 
 const QUIT_CONFIRMATION_MODE_LABELS: Record<QuitConfirmationMode, string> = {
@@ -583,6 +589,9 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Diff whitespace changes"]
         : []),
       ...(settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout ? ["Diff layout"] : []),
+      ...(settings.diffDefaultScope !== DEFAULT_UNIFIED_SETTINGS.diffDefaultScope
+        ? ["Default diff scope"]
+        : []),
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
         ? ["Proactive panels"]
         : []),
@@ -669,6 +678,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffFilesCollapsed,
       settings.diffIgnoreWhitespace,
       settings.diffLayout,
+      settings.diffDefaultScope,
       settings.proactivePanelsEnabled,
       settings.environmentIdentificationMode,
       settings.contextWindowMeterEnabled,
@@ -774,6 +784,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffFilesCollapsed: DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
+      diffDefaultScope: DEFAULT_UNIFIED_SETTINGS.diffDefaultScope,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
@@ -2576,6 +2587,42 @@ export function GeneralSettingsPanel() {
           }
         />
         <SettingsRow
+          {...searchableSetting("default-diff-scope")}
+          description="Choose what the diff panel shows first when you open it."
+          resetAction={
+            settings.diffDefaultScope !== DEFAULT_UNIFIED_SETTINGS.diffDefaultScope ? (
+              <SettingResetButton
+                label="default diff scope"
+                onClick={() =>
+                  updateSettings({ diffDefaultScope: DEFAULT_UNIFIED_SETTINGS.diffDefaultScope })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.diffDefaultScope}
+              onValueChange={(value) => {
+                if (value === "unstaged" || value === "branch") {
+                  updateSettings({ diffDefaultScope: value });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Default diff scope">
+                <SelectValue>{DIFF_DEFAULT_SCOPE_LABELS[settings.diffDefaultScope]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="unstaged">
+                  {DIFF_DEFAULT_SCOPE_LABELS.unstaged}
+                </SelectItem>
+                <SelectItem hideIndicator value="branch">
+                  {DIFF_DEFAULT_SCOPE_LABELS.branch}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <SettingsRow
           {...searchableSetting("diff-layout")}
           description="Show diffs stacked or side by side. The toggle in the diff toolbar changes this too."
           resetAction={
@@ -2612,7 +2659,7 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           {...searchableSetting("proactive-panels")}
-          description="Open linked pull requests first. Otherwise, open the working tree diff for changes to at least 3 files or 50 lines."
+          description="Open linked pull requests first. Otherwise, open the diff for changes to at least 3 files or 50 lines."
           resetAction={
             settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled ? (
               <SettingResetButton
