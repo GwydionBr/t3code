@@ -384,6 +384,9 @@ export function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }
   );
 }
 
+/** Shared by thread rows and branch-group headers so running terminals read the same. */
+export const TERMINAL_RUNNING_COLOR_CLASS = "text-teal-600 dark:text-teal-300/90";
+
 export function terminalStatusFromRunningIds(
   runningTerminalIds: ReadonlyArray<string>,
 ): TerminalStatusIndicator | null {
@@ -392,7 +395,7 @@ export function terminalStatusFromRunningIds(
   }
   return {
     label: "Terminal process running",
-    colorClass: "text-teal-600 dark:text-teal-300/90",
+    colorClass: TERMINAL_RUNNING_COLOR_CLASS,
     pulse: true,
   };
 }

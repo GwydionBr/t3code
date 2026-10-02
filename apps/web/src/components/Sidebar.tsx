@@ -226,6 +226,7 @@ import {
   resolveThreadPullRequestBadge,
   terminalStatusFromRunningIds,
   synchronizeTerminalPulse,
+  TERMINAL_RUNNING_COLOR_CLASS,
   type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
 } from "./ThreadStatusIndicators";
@@ -312,7 +313,7 @@ function SidebarBranchStatusSummary({
   return (
     <span
       aria-hidden
-      className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-sidebar-muted-foreground/65"
+      className="flex shrink-0 items-center gap-1.5 text-3xs tabular-nums text-sidebar-muted-foreground/65"
     >
       {summary.map(({ status, count }) => (
         <span key={status} className="inline-flex items-center gap-1">
@@ -332,7 +333,10 @@ function SidebarBranchTerminalSummary({ count }: { readonly count: number }) {
     <span
       aria-hidden
       data-testid="sidebar-branch-terminal-summary"
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-teal-600 dark:text-teal-300/90"
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 text-3xs tabular-nums",
+        TERMINAL_RUNNING_COLOR_CLASS,
+      )}
     >
       <TerminalIcon className="size-3" />
       {count}
@@ -752,7 +756,7 @@ function SidebarBranchGroupHeader({
               // touch without the page scrolling away from under the gesture.
               style={dragListeners ? { touchAction: "none" } : undefined}
               {...dragListeners}
-              className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-[11px] font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+              className="flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left text-2xs font-medium text-sidebar-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
             />
           }
         >
@@ -768,7 +772,7 @@ function SidebarBranchGroupHeader({
             className="size-3.5 shrink-0 text-sidebar-muted-foreground/55"
           />
           <span className="min-w-0 truncate">{branchLabel}</span>
-          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/70">
+          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-3xs leading-4 tabular-nums text-sidebar-muted-foreground/70">
             {groupSize}
           </span>
           <span className="h-px min-w-2 flex-1 bg-sidebar-border/60" />
@@ -843,14 +847,14 @@ function SidebarBranchGroupDragPreview({
     // translucent branch fill as it rides the cursor.
     <div className="overflow-hidden rounded-md bg-sidebar shadow-lg">
       <div className="overflow-hidden rounded-md border border-primary/40 bg-primary/10">
-        <div className="flex min-h-7 items-center gap-1.5 px-2.5 text-[11px] font-medium text-sidebar-foreground">
+        <div className="flex min-h-7 items-center gap-1.5 px-2.5 text-2xs font-medium text-sidebar-foreground">
           <ChevronDownIcon aria-hidden className="size-3 shrink-0" />
           <GitBranchIcon
             aria-hidden
             className="size-3.5 shrink-0 text-sidebar-muted-foreground/70"
           />
           <span className="min-w-0 truncate">{branchLabel}</span>
-          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-[10px] leading-4 tabular-nums text-sidebar-muted-foreground/80">
+          <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-3xs leading-4 tabular-nums text-sidebar-muted-foreground/80">
             {threads.length}
           </span>
         </div>
@@ -858,7 +862,7 @@ function SidebarBranchGroupDragPreview({
           {threads.map((thread) => (
             <div
               key={`${thread.environmentId}:${thread.id}`}
-              className="flex min-h-8 items-center rounded-sm px-1.5 text-[13px] text-sidebar-foreground"
+              className="flex min-h-8 items-center rounded-sm px-1.5 text-sm text-sidebar-foreground"
             >
               <span className="min-w-0 truncate">{thread.title}</span>
             </div>
