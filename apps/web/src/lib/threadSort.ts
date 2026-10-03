@@ -1,6 +1,7 @@
 export {
   activeThreadAnchorTimestampMs,
   groupActiveThreadsByBranch,
+  groupThreadsByBranch,
   getLatestThreadForProject,
   getThreadSortTimestamp,
   sortActiveThreadsByBranch,
