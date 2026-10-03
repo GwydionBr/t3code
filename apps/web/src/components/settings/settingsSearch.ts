@@ -281,6 +281,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["combine matching repositories environments sidebar"],
   },
   {
+    id: "project-order",
+    title: "Project order",
+    to: "/settings/general",
+    searchTerms: ["sort projects sidebar manual created recent"],
+  },
+  {
     id: "snooze-limited-threads",
     title: "Snooze limited threads",
     to: "/settings/general",
@@ -364,7 +370,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "default-diff-scope",
     title: "Default diff scope",
     to: "/settings/general",
-    searchTerms: ["working tree branch changes base compare unstaged open diff panel"],
+    searchTerms: ["uncommitted changes working tree branch base compare unstaged open diff panel"],
   },
   {
     id: "diff-layout",
