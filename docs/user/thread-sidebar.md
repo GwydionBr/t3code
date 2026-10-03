@@ -128,7 +128,8 @@ open.
 On web and desktop, turn on **Settings → General → Working section (beta)** to move threads that
 are working or monitoring into a collapsed **Working** section at the bottom of the sidebar. A
 thread returns to the top of the active list when it finishes, fails, or needs an approval or
-answer. Pinned threads stay in the pinned section.
+answer. Pinned threads stay in the pinned section. A branch group moves as a whole: while any of
+its threads is working, the entire group sits in the Working section.
 
 While this is on, the active list is ordered by when each thread last came back to you, so you
 cannot drag to reorder it. Your saved order returns when you turn it off.

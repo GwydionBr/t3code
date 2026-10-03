@@ -26,6 +26,7 @@ import {
   isContextMenuPointerDown,
   isSidebarSubagentThread,
   isSidebarThreadWorking,
+  partitionInboxByWorkingGroup,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
@@ -2730,6 +2731,65 @@ describe("Working shelf (beta)", () => {
           entry === waiting ? Date.parse("2026-03-09T11:05:00.000Z") : undefined,
         ).map((entry) => entry.id),
       ).toEqual(["asks-approval", "finished"]);
+    });
+  });
+
+  describe("branch groups", () => {
+    const member = (id: string, branch: string | null, working = false) => ({
+      ...(working ? { ...idle, runtime } : idle),
+      id: ThreadId.make(id),
+      environmentId: localEnvironmentId,
+      projectId: "project-1",
+      branch,
+      createdAt: "2026-03-09T09:00:00.000Z",
+      unsettledAt: null,
+    });
+
+    it("folds a whole branch group into Working when one member works", () => {
+      const { active, working } = partitionInboxByWorkingGroup([
+        member("feat-idle", "feat"),
+        member("feat-busy", "feat", true),
+        member("main-idle", "main"),
+        member("loose-busy", null, true),
+        member("loose-idle", null),
+      ]);
+      expect(working.map((entry) => entry.id)).toEqual(["feat-idle", "feat-busy", "loose-busy"]);
+      expect(active.map((entry) => entry.id)).toEqual(["main-idle", "loose-idle"]);
+    });
+
+    it("keeps a group together at its newest member's slot", () => {
+      const at = (id: string, branch: string | null, completedAt: string) => ({
+        ...member(id, branch),
+        latestRun: { ...makeLatestRun({ completedAt }), requestedAt: completedAt },
+      });
+      const sorted = sortInboxThreadsByReturn([
+        at("feat-old", "feat", "2026-03-09T10:00:00.000Z"),
+        at("other", null, "2026-03-09T11:00:00.000Z"),
+        at("feat-new", "feat", "2026-03-09T12:00:00.000Z"),
+      ]);
+      expect(sorted.map((entry) => entry.id)).toEqual(["feat-new", "feat-old", "other"]);
+    });
+
+    it("lets a group leave a time-ordered inbox but not be arranged in it", () => {
+      const input = {
+        memberKeys: ["m1", "m2"],
+        activeOrder: ["a0", "m1", "m2"],
+        activeKeysById: new Map<string, string | null>(),
+        pinnedKeysById: new Map<string, string | null>(),
+        activeTimeOrdered: true,
+      };
+      expect(
+        planSidebarGroupDrop({
+          ...input,
+          target: { section: "active", pinnedOrder: [], activeOrder: ["m1", "m2", "a0"] },
+        }),
+      ).toEqual({ kind: "none" });
+      expect(
+        planSidebarGroupDrop({
+          ...input,
+          target: { section: "settled", pinnedOrder: [], activeOrder: ["a0"] },
+        }),
+      ).toEqual({ kind: "settle-group", members: ["m1", "m2"] });
     });
   });
 

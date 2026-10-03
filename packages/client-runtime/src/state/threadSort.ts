@@ -171,10 +171,22 @@ export function groupActiveThreadsByBranch<
     readonly activeOrderKey?: string | null | undefined;
   },
 >(threads: readonly T[]): ActiveThreadBranchGroup<T>[] {
-  const ordered = sortActiveThreadsByOrderKey(threads);
+  return groupThreadsByBranch(sortActiveThreadsByOrderKey(threads));
+}
+
+/** Branch grouping without re-sorting: each group sits at its first thread's
+    position in `threads`, for lists that bring their own order. */
+export function groupThreadsByBranch<
+  T extends {
+    readonly id: string;
+    readonly environmentId?: string | undefined;
+    readonly projectId?: string | undefined;
+    readonly branch?: string | null | undefined;
+  },
+>(threads: readonly T[]): ActiveThreadBranchGroup<T>[] {
   const groups = new Map<string, ActiveThreadBranchGroup<T>>();
 
-  for (const thread of ordered) {
+  for (const thread of threads) {
     const key = activeThreadBranchGroupKey(thread);
     const group = groups.get(key);
     if (group) group.threads.push(thread);

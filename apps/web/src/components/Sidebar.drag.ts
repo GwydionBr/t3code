@@ -255,9 +255,16 @@ export function createSidebarSortingStrategy(input: {
     } else {
       marker("active-placeholder");
     }
-    if (items.some((item) => item.kind === "marker" && item.marker === "working-header")) {
+    // Working is never a drop target, so its rows and branch headers hold
+    // their rendered order.
+    const workingHeader = items.findIndex(
+      (item) => item.kind === "marker" && item.marker === "working-header",
+    );
+    if (workingHeader >= 0) {
       marker("working-header");
-      projected.push(...groups.working);
+      for (let i = workingHeader + 1; i < items.length && !isShelfHeader(items[i]); i++) {
+        projected.push(items[i]!);
+      }
     }
     if (
       groups.snoozed.length > 0 ||

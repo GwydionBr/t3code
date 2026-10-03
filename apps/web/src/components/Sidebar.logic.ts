@@ -11,6 +11,8 @@ import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contract
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import {
+  activeThreadBranchGroupKey,
+  groupThreadsByBranch,
   planContiguousBlockReorder,
   planPinnedReorder,
 } from "@t3tools/client-runtime/state/thread-sort";
@@ -590,6 +592,8 @@ export function planSidebarGroupDrop(input: {
   /** Active thread key → branch group key, so a block move that would split a
    *different* group resolves to `none` (members stay contiguous by build). */
   readonly activeBranchKeyById?: ReadonlyMap<string, string>;
+  /** Working beta: the inbox sorts by time, so a group cannot be arranged in it. */
+  readonly activeTimeOrdered?: boolean;
 }): SidebarGroupDropPlan {
   const {
     memberKeys,
@@ -603,6 +607,7 @@ export function planSidebarGroupDrop(input: {
   if (memberKeys.length === 0) return { kind: "none" };
   switch (target.section) {
     case "active": {
+      if (input.activeTimeOrdered) return { kind: "none" };
       const order = restoreCollapsedBranchGroupMembers(
         target.activeOrder,
         activeOrder,
@@ -1553,13 +1558,17 @@ export function reduceSidebarProjectScopeMenuState(
 
 /** Working beta: the inbox lists threads newest first by when each last came
     back to the user, so a thread that leaves the Working shelf lands on top.
+    Branch groups stay together at their newest member's slot.
     `observedReturnAt` adds returns the server does not stamp, such as an
     approval request mid-turn or background work ending. */
 export function sortInboxThreadsByReturn<
   T extends Pick<
     SidebarThreadSummary,
     "id" | "environmentId" | "createdAt" | "unsettledAt" | "latestRun"
-  >,
+  > & {
+    readonly projectId?: string | undefined;
+    readonly branch?: string | null | undefined;
+  },
 >(threads: readonly T[], observedReturnAt?: (thread: T) => number | undefined): T[] {
   const timestamps = new Map(
     threads.map((thread) => [
@@ -1573,12 +1582,34 @@ export function sortInboxThreadsByReturn<
       ),
     ]),
   );
-  return [...threads].sort(
+  const sorted = [...threads].sort(
     (left, right) =>
       timestamps.get(right)! - timestamps.get(left)! ||
       left.id.localeCompare(right.id) ||
       left.environmentId.localeCompare(right.environmentId),
   );
+  return groupThreadsByBranch(sorted).flatMap((group) => group.threads);
+}
+
+/** Working beta: a branch group works as a unit, so one working member folds
+    the whole group into the Working shelf and it returns to the inbox together. */
+export function partitionInboxByWorkingGroup<
+  T extends ThreadStatusInput & {
+    readonly id: string;
+    readonly environmentId?: string | undefined;
+    readonly projectId?: string | undefined;
+    readonly branch?: string | null | undefined;
+  },
+>(threads: readonly T[]): { readonly active: T[]; readonly working: T[] } {
+  const workingGroups = new Set(
+    threads.filter(isSidebarThreadWorking).map(activeThreadBranchGroupKey),
+  );
+  const active: T[] = [];
+  const working: T[] = [];
+  for (const thread of threads) {
+    (workingGroups.has(activeThreadBranchGroupKey(thread)) ? working : active).push(thread);
+  }
+  return { active, working };
 }
 
 /** The timestamp a working thread's elapsed label counts from: the running

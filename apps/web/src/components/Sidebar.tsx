@@ -36,7 +36,9 @@ import {
 import {
   activeThreadBranchGroupKey,
   groupActiveThreadsByBranch,
+  groupThreadsByBranch,
   resolveSettledThreadTimestamp,
+  type ActiveThreadBranchGroup,
   sortSettledThreads,
 } from "@t3tools/client-runtime/state/thread-sort";
 import {
@@ -191,6 +193,7 @@ import {
   isSidebarNestedLinkClick,
   isSidebarThreadWorking,
   isTrailingDoubleClick,
+  partitionInboxByWorkingGroup,
   orderItemsByPreferredIds,
   parseSidebarBranchHeaderId,
   planSidebarGroupDrop,
@@ -2976,12 +2979,9 @@ export default function Sidebar() {
     const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
     observeInboxReturns(workingShelfEnabled ? threads : null);
     const pinned: EnvironmentThreadShell[] = [];
-    const active: EnvironmentThreadShell[] = [];
-    const working: EnvironmentThreadShell[] = [];
     // Working beta: only inbox threads fold away. Pins stay where the user
     // put them, and snoozed or settled threads keep their shelves.
-    const inbox = (thread: EnvironmentThreadShell) =>
-      workingShelfEnabled && isSidebarThreadWorking(thread) ? working : active;
+    const inbox: EnvironmentThreadShell[] = [];
     const snoozed: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
     const draggable = new Set<string>();
@@ -3012,7 +3012,7 @@ export default function Sidebar() {
           ? pinned
           : optimisticDrop.section === "settled"
             ? settled
-            : inbox(projected)
+            : inbox
         ).push(
           optimisticDrop.clearsSnooze
             ? projected
@@ -3030,7 +3030,7 @@ export default function Sidebar() {
             ? settled
             : section === "pinned"
               ? pinned
-              : inbox(thread)
+              : inbox
         ).push(thread);
       }
     }
@@ -3040,6 +3040,9 @@ export default function Sidebar() {
     // sort, or mixed-version fleets would render different pinned orders on
     // web and mobile from the same data.
     const sortedPinned = sortPinnedThreadsForSidebar(pinned);
+    const { active, working } = workingShelfEnabled
+      ? partitionInboxByWorkingGroup(inbox)
+      : { active: inbox, working: [] };
     const sortedActive = workingShelfEnabled
       ? sortInboxThreadsByReturn(active, (thread) =>
           observedInboxReturns.get(
@@ -3197,25 +3200,44 @@ export default function Sidebar() {
   // group (singletons get a unique key) so a drop that would split a group is
   // rejected; `activeBranchHeaderByKey` covers only headered groups so the drag
   // preview can re-emit their headers.
-  // The Working beta orders the inbox by return time; branch grouping would
-  // reshuffle it, so active rows stay ungrouped while the beta is on.
+  // The Working beta orders the inbox by return time and already keeps groups
+  // contiguous, so grouping must not re-sort it by order key.
   const activeBranchGroups = useMemo(
-    () => (workingShelfEnabled ? [] : groupActiveThreadsByBranch(activeThreads)),
+    () =>
+      workingShelfEnabled
+        ? groupThreadsByBranch(activeThreads)
+        : groupActiveThreadsByBranch(activeThreads),
     [activeThreads, workingShelfEnabled],
   );
+  const workingBranchGroups = useMemo(() => groupThreadsByBranch(workingThreads), [workingThreads]);
   const { activeBranchKeyById, activeBranchHeaderByKey, branchGroupByKey } = useMemo(() => {
     const branchKey = new Map<string, string>();
     const headerKey = new Map<string, string>();
     const byKey = new Map<
       string,
-      { readonly branch: string; readonly threads: ReadonlyArray<EnvironmentThreadShell> }
+      {
+        readonly branch: string;
+        readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+        readonly section: "active" | "working";
+      }
     >();
+    // Working groups only need a header entry: they neither drag nor drop.
+    for (const group of workingBranchGroups) {
+      const first = group.threads[0];
+      if (first === undefined || group.branch === null || group.threads.length === 1) continue;
+      byKey.set(activeThreadBranchGroupKey(first), {
+        branch: group.branch,
+        threads: group.threads,
+        section: "working",
+      });
+    }
     for (const group of activeBranchGroups) {
       const first = group.threads[0];
       if (first === undefined) continue;
       const groupKey = activeThreadBranchGroupKey(first);
       const hasHeader = group.branch !== null && group.threads.length > 1;
-      if (hasHeader) byKey.set(groupKey, { branch: group.branch!, threads: group.threads });
+      if (hasHeader)
+        byKey.set(groupKey, { branch: group.branch!, threads: group.threads, section: "active" });
       for (const thread of group.threads) {
         const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
         branchKey.set(key, groupKey);
@@ -3227,7 +3249,7 @@ export default function Sidebar() {
       activeBranchHeaderByKey: headerKey,
       branchGroupByKey: byKey,
     };
-  }, [activeBranchGroups]);
+  }, [activeBranchGroups, workingBranchGroups]);
   const [expandedBranchGroups, setExpandedBranchGroups] = useLocalStorage(
     EXPANDED_BRANCH_GROUPS_KEY,
     DEFAULT_EXPANDED_BRANCH_GROUPS,
@@ -3989,23 +4011,30 @@ export default function Sidebar() {
     items.push({ kind: "marker", marker: "active-placeholder" });
     // Active rows group by branch. A multi-thread branch group gets a
     // collapsible header; singletons and branchless threads stay plain rows.
-    if (workingShelfEnabled) items.push(...rowsOf(activeThreads, "active"));
-    for (const group of activeBranchGroups) {
-      const first = group.threads[0];
-      if (first === undefined) continue;
-      if (group.branch === null || group.threads.length === 1) {
-        items.push(...rowsOf(group.threads, "active"));
-        continue;
+    const groupRowsOf = (
+      groups: ReadonlyArray<ActiveThreadBranchGroup<EnvironmentThreadShell>>,
+      section: "active" | "working",
+    ) => {
+      for (const group of groups) {
+        const first = group.threads[0];
+        if (first === undefined) continue;
+        if (group.branch === null || group.threads.length === 1) {
+          items.push(...rowsOf(group.threads, section));
+          continue;
+        }
+        const groupKey = activeThreadBranchGroupKey(first);
+        items.push({ kind: "branch-header", groupKey });
+        const expanded = expandedBranchGroupKeys.has(groupKey);
+        const visibleThreads = expanded ? group.threads : group.threads.slice(0, 1);
+        items.push(...rowsOf(visibleThreads, section));
       }
-      const groupKey = activeThreadBranchGroupKey(first);
-      items.push({ kind: "branch-header", groupKey });
-      const expanded = expandedBranchGroupKeys.has(groupKey);
-      const visibleThreads = expanded ? group.threads : group.threads.slice(0, 1);
-      items.push(...rowsOf(visibleThreads, "active"));
-    }
+    };
+    groupRowsOf(activeBranchGroups, "active");
     if (workingThreads.length > 0) {
       items.push({ kind: "marker", marker: "working-header" });
-      items.push(...rowsOf(visibleWorkingThreads, "working"));
+      // A collapsed shelf shows only the open thread, without its group frame.
+      if (workingShelfExpanded) groupRowsOf(workingBranchGroups, "working");
+      else items.push(...rowsOf(visibleWorkingThreads, "working"));
     }
     if (snoozedThreads.length > 0) {
       items.push({ kind: "marker", marker: "snoozed-header" });
@@ -4026,7 +4055,8 @@ export default function Sidebar() {
     snoozedThreads.length,
     visibleSnoozedThreads,
     visibleWorkingThreads,
-    workingShelfEnabled,
+    workingBranchGroups,
+    workingShelfExpanded,
     workingThreads.length,
   ]);
   // Which visible active rows belong to a multi-thread branch group, and which
@@ -4034,7 +4064,10 @@ export default function Sidebar() {
   // edge, member rows the sides, and the last visible member the bottom edge.
   const branchGroupRowEdges = useMemo((): ReadonlyMap<string, "member" | "member-last"> => {
     const edges = new Map<string, "member" | "member-last">();
-    for (const group of activeBranchGroups) {
+    const framedGroups = workingShelfExpanded
+      ? [...activeBranchGroups, ...workingBranchGroups]
+      : activeBranchGroups;
+    for (const group of framedGroups) {
       const first = group.threads[0];
       if (first === undefined || group.branch === null || group.threads.length === 1) continue;
       const groupKey = activeThreadBranchGroupKey(first);
@@ -4047,7 +4080,7 @@ export default function Sidebar() {
       });
     }
     return edges;
-  }, [activeBranchGroups, expandedBranchGroupKeys]);
+  }, [activeBranchGroups, expandedBranchGroupKeys, workingBranchGroups, workingShelfExpanded]);
   useEffect(() => {
     // Cancel a drag whose lifted item left the list (e.g. a thread archived, or
     // a branch group dissolved, mid-drag). The dragged id is a thread key or a
@@ -4212,6 +4245,7 @@ export default function Sidebar() {
         activeKeysById,
         activeReorderableKeys: activeReorderableThreadKeys,
         activeBranchKeyById,
+        activeTimeOrdered: workingShelfEnabled,
       });
       return { plan, memberKeys, target };
     },
@@ -4226,6 +4260,7 @@ export default function Sidebar() {
       serverConfigs,
       sidebarListItems,
       threadByKey,
+      workingShelfEnabled,
     ],
   );
   const draggedThreadKey = dragState?.activeKey;
@@ -5891,6 +5926,7 @@ export default function Sidebar() {
                           // The group can be lifted only when every member can
                           // reorder in Active, and never while a drop settles.
                           const groupDraggable =
+                            group.section === "active" &&
                             optimisticDrop === null &&
                             group.threads.every((groupThread) =>
                               activeReorderableThreadKeys.has(
