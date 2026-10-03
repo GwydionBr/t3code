@@ -51,7 +51,7 @@ const DEFAULT_DIFF_LAYOUT: DiffLayout = "stacked";
 
 export const DiffDefaultScope = Schema.Literals(["unstaged", "branch"]);
 export type DiffDefaultScope = typeof DiffDefaultScope.Type;
-const DEFAULT_DIFF_DEFAULT_SCOPE: DiffDefaultScope = "unstaged";
+const DEFAULT_DIFF_DEFAULT_SCOPE: DiffDefaultScope = "branch";
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
