@@ -918,10 +918,21 @@ function SortableSidebarBranchHeader(props: {
 function SidebarBranchGroupDragPreview({
   branchLabel,
   threads,
+  expanded,
+  projectLabel,
+  targetSection,
 }: {
   readonly branchLabel: string;
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+  readonly expanded: boolean;
+  readonly projectLabel: string | null;
+  readonly targetSection: SidebarSection | null;
 }) {
+  const dropVerb = targetSection === null ? null : resolveSidebarDropVerb("active", targetSection);
+  const visibleThreads =
+    expanded || targetSection === "pinned" || targetSection === "settled"
+      ? threads
+      : threads.slice(0, 1);
   return (
     // Opaque sidebar base under the branch tint so the lifted block reads as a
     // solid card like a single-row lift; rows beneath never show through the
@@ -929,7 +940,16 @@ function SidebarBranchGroupDragPreview({
     <div className="overflow-hidden rounded-md bg-sidebar shadow-lg">
       <div className="overflow-hidden rounded-md border border-primary/40 bg-primary/10">
         <div className="flex min-h-7 items-center gap-1.5 px-2.5 text-2xs font-medium text-sidebar-foreground">
-          <ChevronDownIcon aria-hidden className="size-3 shrink-0" />
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              "size-3 shrink-0",
+              !expanded &&
+                targetSection !== "pinned" &&
+                targetSection !== "settled" &&
+                "-rotate-90",
+            )}
+          />
           <GitBranchIcon
             aria-hidden
             className="size-3.5 shrink-0 text-sidebar-muted-foreground/70"
@@ -938,14 +958,37 @@ function SidebarBranchGroupDragPreview({
           <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-sidebar-border/55 px-1 text-3xs leading-4 tabular-nums text-sidebar-muted-foreground/80">
             {threads.length}
           </span>
+          {dropVerb ? (
+            <SidebarDropBadge verb={dropVerb} />
+          ) : (
+            <span className="ml-auto">
+              <SidebarBranchStatusSummary summary={resolveSidebarBranchStatusSummary(threads)} />
+            </span>
+          )}
         </div>
         <div className="bg-primary/[0.06] px-1.5 pb-1">
-          {threads.map((thread) => (
+          {visibleThreads.map((thread) => (
             <div
               key={`${thread.environmentId}:${thread.id}`}
-              className="flex min-h-8 items-center rounded-sm px-1.5 text-sm text-sidebar-foreground"
+              className={cn(
+                "flex justify-center rounded-sm px-1.5 text-sm text-sidebar-foreground",
+                targetSection === "settled"
+                  ? "h-9 flex-row items-center"
+                  : "h-[5.125rem] flex-col gap-1",
+              )}
             >
+              {targetSection !== "settled" && projectLabel ? (
+                <span className="truncate text-xs font-medium text-secondary-label">
+                  {projectLabel}
+                </span>
+              ) : null}
               <span className="min-w-0 truncate">{thread.title}</span>
+              {targetSection !== "settled" ? (
+                <span className="flex min-w-0 items-center gap-1 text-2xs text-muted-foreground/65">
+                  <GitBranchIcon aria-hidden className="size-3 shrink-0" />
+                  <span className="truncate">{branchLabel}</span>
+                </span>
+              ) : null}
             </div>
           ))}
         </div>
@@ -1342,6 +1385,17 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
     </>
   ),
 };
+
+function SidebarDropBadge({ verb }: { readonly verb: SidebarDropVerb }) {
+  return (
+    <span
+      role="status"
+      className="pointer-events-none ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-primary/40 bg-primary/10 px-1.5 text-2xs font-medium text-primary"
+    >
+      {dropVerbBadge[verb]}
+    </span>
+  );
+}
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
@@ -1873,14 +1927,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       ? "wake"
       : props.sweepAction;
   const dragDestination =
-    destinationVerb !== null ? (
-      <span
-        role="status"
-        className="pointer-events-none ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-primary/40 bg-primary/10 px-1.5 text-2xs font-medium text-primary"
-      >
-        {dropVerbBadge[destinationVerb]}
-      </span>
-    ) : null;
+    destinationVerb !== null ? <SidebarDropBadge verb={destinationVerb} /> : null;
 
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
@@ -4267,15 +4314,21 @@ export default function Sidebar() {
   );
   const sortableIds = useMemo(() => sidebarListItems.map(sidebarListItemId), [sidebarListItems]);
   const draggedSettledOrder = useMemo(() => {
-    const thread = dragState === null ? undefined : threadByKey.get(dragState.activeKey);
-    if (dragState === null || thread === undefined) return [];
+    if (dragState === null) return [];
+    const movingThreads =
+      dragState.activeGroupKey !== null
+        ? (branchGroupByKey.get(dragState.activeGroupKey)?.threads ?? [])
+        : [threadByKey.get(dragState.activeKey)].filter((thread) => thread !== undefined);
     const key = (candidate: EnvironmentThreadShell) =>
       scopedThreadKey(scopeThreadRef(candidate.environmentId, candidate.id));
+    const movingKeys = new Set(movingThreads.map(key));
     return sortSettledThreads([
-      ...settledThreads.filter((candidate) => key(candidate) !== dragState.activeKey),
-      applySidebarThreadDrop(thread, "settled", dragState.occurredAt),
+      ...settledThreads.filter((candidate) => !movingKeys.has(key(candidate))),
+      ...movingThreads.map((thread) =>
+        applySidebarThreadDrop(thread, "settled", dragState.occurredAt),
+      ),
     ]).map(key);
-  }, [dragState, settledThreads, threadByKey]);
+  }, [branchGroupByKey, dragState, settledThreads, threadByKey]);
   // Working beta: the inbox is time-ordered too, so the preview shows the
   // slot a drop will land in, not the slot under the pointer.
   const draggedActiveOrder = useMemo(() => {
@@ -4392,6 +4445,7 @@ export default function Sidebar() {
         (id) => buildGroupDropPlan(draggedGroupKey, id).plan.kind !== "none",
         {
           items: sidebarListItems,
+          groupMemberKeys: groupMemberKeysOf(draggedGroupKey),
           activationY: dragActivationY ?? null,
         },
       );
@@ -4432,6 +4486,7 @@ export default function Sidebar() {
     activeBranchKeyById,
     activeKeysById,
     buildGroupDropPlan,
+    groupMemberKeysOf,
     pinnedKeysById,
     serverConfigs,
     activeKeys,
@@ -6267,7 +6322,14 @@ export default function Sidebar() {
                     drag source in place; a single thread row must instead lift
                     and follow the pointer, so its overlay stays unmounted. */}
                 {draggedGroupKey !== null ? (
-                  <DragOverlay modifiers={[restrictToVerticalAxis]} dropAnimation={null}>
+                  <DragOverlay
+                    modifiers={[
+                      restrictToVerticalAxis,
+                      restrictBelowPins,
+                      restrictToFirstScrollableAncestor,
+                    ]}
+                    dropAnimation={null}
+                  >
                     {(() => {
                       const group = branchGroupByKey.get(draggedGroupKey);
                       if (group === undefined) return null;
@@ -6275,6 +6337,15 @@ export default function Sidebar() {
                         <SidebarBranchGroupDragPreview
                           branchLabel={group.branch}
                           threads={group.threads}
+                          expanded={expandedBranchGroupKeys.has(draggedGroupKey)}
+                          projectLabel={
+                            group.threads[0]
+                              ? (projectDisplayNameByKey.get(
+                                  `${group.threads[0].environmentId}:${group.threads[0].projectId}`,
+                                ) ?? null)
+                              : null
+                          }
+                          targetSection={dragTargetSection}
                         />
                       );
                     })()}

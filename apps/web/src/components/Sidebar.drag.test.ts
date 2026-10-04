@@ -8,6 +8,7 @@ import {
 } from "./Sidebar.drag";
 import {
   resolveSidebarDropTarget,
+  resolveSidebarGroupDropTarget,
   sidebarBranchHeaderId,
   sidebarListItemId,
   sidebarMarkerId,
@@ -132,6 +133,8 @@ describe("sidebar collision detection", () => {
     { sourceSection: "active", pins: 1 },
     { sourceSection: "pinned", pins: 1 },
     { sourceSection: "settled", pins: 1 },
+    { sourceSection: "group", pins: 0 },
+    { sourceSection: "group", pins: 1 },
   ] as const)(
     "switches on crossing the divider row from $sourceSection with $pins pins",
     ({ sourceSection, pins }) => {
@@ -142,10 +145,18 @@ describe("sidebar collision detection", () => {
         divider,
         thread("a", "active"),
         ...(sourceSection === "active" ? [thread("source", "active")] : []),
+        ...(sourceSection === "group"
+          ? [
+              { kind: "branch-header", groupKey: "g" } as const,
+              thread("g1", "active"),
+              thread("g2", "active"),
+            ]
+          : []),
         settledHeader,
         ...(sourceSection === "settled" ? [thread("source", "settled")] : []),
       ];
-      const { rects, activeIndex } = layout(items, "source", "a");
+      const sourceId = sourceSection === "group" ? sidebarBranchHeaderId("g") : "source";
+      const { rects, activeIndex } = layout(items, sourceId, "a");
       const sourceRect = rects[activeIndex]!;
       let boundaryTop = 300;
       const boundaryNode = {
@@ -161,6 +172,7 @@ describe("sidebar collision detection", () => {
       const detector = createSidebarCollisionDetection(() => true, {
         items,
         activationY: sourceSection === "pinned" ? 200 : 600,
+        ...(sourceSection === "group" ? { groupMemberKeys: ["g1", "g2"] } : {}),
       });
       const at = (center: number) => {
         const collisionRect = {
@@ -171,7 +183,7 @@ describe("sidebar collision detection", () => {
         const args = {
           ...collisionArgs(),
           active: {
-            id: "source",
+            id: sourceId,
             data: { current: {} },
             rect: { current: { initial: sourceRect, translated: collisionRect } },
           },
@@ -197,7 +209,12 @@ describe("sidebar collision detection", () => {
           })),
         };
         const over = detector(args)[0];
-        return over ? resolveSidebarDropTarget(items, "source", String(over.id))?.section : null;
+        return over
+          ? (sourceSection === "group"
+              ? resolveSidebarGroupDropTarget(items, "g", ["g1", "g2"], String(over.id))
+              : resolveSidebarDropTarget(items, "source", String(over.id))
+            )?.section
+          : null;
       };
       expect(at(330)).toBe("active");
       expect(at(317)).toBe("active");
@@ -926,6 +943,76 @@ describe("branch group headers in the sorting preview", () => {
     expect(result.get(sidebarBranchHeaderId(groupKey))?.scaleY).toBe(1);
   });
 
+  it("reserves both pinned labels and every member when pinning a collapsed group", () => {
+    const collapsedItems = [
+      pinnedHeader,
+      divider,
+      { kind: "branch-header", groupKey } as const,
+      thread("a1", "active"),
+      settledHeader,
+    ];
+    const result = preview(
+      {
+        items: collapsedItems,
+        settledOrder: [],
+        settledExpanded: true,
+        boundaryLabelHeight: 24,
+        activeBranchHeaderByKey: new Map([
+          ["a1", groupKey],
+          ["a2", groupKey],
+        ]),
+      },
+      sidebarBranchHeaderId(groupKey),
+      sidebarMarkerId("pinned-header"),
+    );
+    // Both 82px members become Pins, including the one hidden at pickup.
+    // Pinned label (25px) + two cards (166px) precede the Active divider.
+    expect(result.get(sidebarMarkerId("pinned-divider"))).toEqual({ ...stationary, y: 190 });
+    expect(result.get("a1")?.scaleY).toBe(0);
+  });
+
+  it("previews settled members as slim rows in persisted order", () => {
+    const settledItems = [...items, thread("s", "settled")];
+    const result = preview(
+      {
+        items: settledItems,
+        settledOrder: ["a1", "a2", "s"],
+        settledExpanded: true,
+        boundaryLabelHeight: 24,
+        activeBranchHeaderByKey: new Map([
+          ["a1", groupKey],
+          ["a2", groupKey],
+        ]),
+      },
+      sidebarBranchHeaderId(groupKey),
+      "s",
+    );
+    const rects = layout(settledItems, sidebarBranchHeaderId(groupKey), "s").rects;
+    const shelfTop = rects[5]!.top + result.get(sidebarMarkerId("settled-header"))!.y;
+    const settledTop = rects[6]!.top + result.get("s")!.y;
+    // Header (33px) then two slim settled rows (37px each), rather than cards.
+    expect(settledTop - shelfTop).toBe(107);
+  });
+
+  it("keeps peers still and hides all lifted members over the source group", () => {
+    const result = preview(
+      {
+        items,
+        settledOrder: [],
+        settledExpanded: false,
+        activeBranchHeaderByKey: new Map([
+          ["a1", groupKey],
+          ["a2", groupKey],
+        ]),
+      },
+      sidebarBranchHeaderId(groupKey),
+      "a2",
+    );
+    expect(result.get("a1")?.scaleY).toBe(0);
+    expect(result.get("a2")?.scaleY).toBe(0);
+    expect(result.get(sidebarMarkerId("settled-header"))).toEqual(stationary);
+  });
+
   it("lifts the whole branch block out and reflows the rest while its header is dragged", () => {
     // Dragging the header lifts the entire block (header + its member rows) into
     // the DragOverlay: those rows collapse to the zero-scaleY hide, and the rows
@@ -948,9 +1035,9 @@ describe("branch group headers in the sorting preview", () => {
     expect(result.get(sidebarBranchHeaderId(groupKey))?.scaleY).toBe(0);
     expect(result.get("a1")?.scaleY).toBe(0);
     expect(result.get("a2")?.scaleY).toBe(0);
-    // The shelf below slides up by the block's measured height (28+82+82 rows
-    // plus the 1px gaps between them = 195) to close the source slot.
-    expect(result.get(sidebarMarkerId("settled-header"))).toEqual({ ...stationary, y: -195 });
+    // The source block closes, leaving the same empty Active drop target as
+    // a single thread. Its 36px row plus gap reserves 37px of the vacated 195px.
+    expect(result.get(sidebarMarkerId("settled-header"))).toEqual({ ...stationary, y: -158 });
     // Rows above the block hold still.
     expect(result.get(sidebarMarkerId("pinned-header"))).toEqual(stationary);
   });

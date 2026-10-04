@@ -2,6 +2,7 @@ import { closestCenter, type CollisionDetection, type Modifier } from "@dnd-kit/
 import { verticalListSortingStrategy, type SortingStrategy } from "@dnd-kit/sortable";
 import {
   resolveSidebarDropTarget,
+  resolveSidebarGroupDropTarget,
   sidebarListItemId,
   sidebarMarkerId,
   type SidebarListItem,
@@ -37,6 +38,7 @@ export function createSidebarCollisionDetection(
   options: {
     items?: readonly SidebarListItem[];
     activationY?: number | null;
+    groupMemberKeys?: readonly string[];
   } = {},
 ): CollisionDetection {
   const validity = new Map<string, boolean>();
@@ -47,13 +49,14 @@ export function createSidebarCollisionDetection(
     let collisions = closestCenter(args);
     const pointer = args.pointerCoordinates;
     const items = options.items;
-    const source = items?.find((item) => item.kind === "thread" && item.key === args.active.id);
+    const source = items?.find((item) => sidebarListItemId(item) === args.active.id);
     const boundary = args.droppableContainers
       .find((container) => container.id === sidebarMarkerId("pinned-divider"))
       ?.node.current?.querySelector(".sidebar-drag-boundary-label")
       ?.getBoundingClientRect();
-    if (items && boundary && source?.kind === "thread" && pointer) {
-      boundarySection ??= source.section === "pinned" ? "pinned" : "active";
+    if (items && boundary && source && source.kind !== "marker" && pointer) {
+      boundarySection ??=
+        source.kind === "thread" && source.section === "pinned" ? "pinned" : "active";
       // Use the visible divider row, including its sortable translation.
       // Only pointer movement can change sections: opening the destination
       // moves this row, but must not toggle a stationary gesture back.
@@ -74,7 +77,15 @@ export function createSidebarCollisionDetection(
             if (!sections.has(id)) {
               sections.set(
                 id,
-                resolveSidebarDropTarget(items, String(args.active.id), id)?.section ?? null,
+                (source.kind === "branch-header"
+                  ? resolveSidebarGroupDropTarget(
+                      items,
+                      source.groupKey,
+                      options.groupMemberKeys ?? [],
+                      id,
+                    )
+                  : resolveSidebarDropTarget(items, source.key, id)
+                )?.section ?? null,
               );
             }
             return sections.get(id) === boundarySection;
@@ -130,52 +141,25 @@ export function createSidebarSortingStrategy(input: {
   }: Layout): ReturnType<SortingStrategy>[] | null {
     const active = items[activeIndex];
     const over = items[overIndex] ?? active;
-    // A branch-group header drag lifts the whole block (header + its visible
-    // member rows) into the DragOverlay. Project the block as one contiguous
-    // unit so the surrounding rows reflow around a block-sized gap, exactly like
-    // a single row: the source slot closes and a block-tall gap opens at the
-    // hovered target. The lifted rows themselves are hidden (the overlay shows
-    // them). EXPERIMENTAL — verified in a browser, not by the strategy tests.
-    if (active?.kind === "branch-header") {
-      if (!rects[activeIndex]) return null;
-      // The block is the header followed by the contiguous active member rows
-      // that map back to this group.
-      let blockEnd = activeIndex;
-      for (let i = activeIndex + 1; i < items.length; i++) {
-        const item = items[i];
-        if (
-          item?.kind === "thread" &&
-          input.activeBranchHeaderByKey?.get(item.key) === active.groupKey
-        ) {
-          blockEnd = i;
-        } else break;
-      }
-      const blockTop = rects[activeIndex]!.top;
-      const blockBottom = rects[blockEnd]?.bottom;
-      if (blockBottom === undefined) return null;
-      const blockHeight = blockBottom - blockTop + 1;
-      const result = items.map(() => stationary);
-      for (let i = activeIndex; i <= blockEnd; i++) result[i] = hidden;
-      // overIndex === -1 means no legal target under the cursor: hold the list
-      // still (only the block is lifted out) rather than reflowing to nowhere.
-      if (overIndex >= 0 && (overIndex < activeIndex || overIndex > blockEnd)) {
-        if (overIndex > blockEnd) {
-          // Dragging down: rows between the block and the target slide up into
-          // the vacated slot; the block will land just below them.
-          for (let i = blockEnd + 1; i <= overIndex; i++)
-            result[i] = { ...stationary, y: -blockHeight };
-        } else {
-          // Dragging up: rows from the target down to the block slide down to
-          // open the landing gap above them.
-          for (let i = overIndex; i < activeIndex; i++)
-            result[i] = { ...stationary, y: blockHeight };
-        }
-      }
-      return result;
-    }
-    if (active?.kind !== "thread" || !over || !rects[0]) return [];
-    const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
-    if (!target) return [];
+    if (!active || active.kind === "marker" || !over || !rects[0]) return [];
+    const isGroup = active.kind === "branch-header";
+    const memberKeys = isGroup
+      ? [...(input.activeBranchHeaderByKey ?? [])]
+          .filter(([, groupKey]) => groupKey === active.groupKey)
+          .map(([key]) => key)
+      : [active.key];
+    const movingKeys = new Set(memberKeys);
+    const target = isGroup
+      ? resolveSidebarGroupDropTarget(items, active.groupKey, memberKeys, sidebarListItemId(over))
+      : resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
+    if (!target)
+      return isGroup
+        ? items.map((item) =>
+            item === active || (item.kind === "thread" && movingKeys.has(item.key))
+              ? hidden
+              : stationary,
+          )
+        : [];
     const groups: Record<SidebarSection, ThreadItem[]> = {
       pinned: [],
       active: [],
@@ -199,7 +183,7 @@ export function createSidebarSortingStrategy(input: {
       if (item.section === "pinned" || item.section === "active" || item.section === "working")
         cardHeight ??= rects[index]?.height;
       else slimHeight ??= rects[index]?.height;
-      if (item.key !== active.key) groups[item.section].push(item);
+      if (!movingKeys.has(item.key)) groups[item.section].push(item);
     }
     // Cards are 4.875rem + 0.25rem padding; slim rows/placeholders are h-9.
     const scale =
@@ -215,14 +199,25 @@ export function createSidebarSortingStrategy(input: {
           ? input.settledOrder
           : (input.activeOrder ?? target.activeOrder);
     const ranks = new Map(order.map((key, index) => [key, index]));
-    const rank = ranks.get(active.key) ?? Number.POSITIVE_INFINITY;
-    const index = group.findIndex(
-      (item) => (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
-    );
-    group.splice(index < 0 ? group.length : index, 0, { ...active, section: target.section });
+    const visibleMemberKeys = memberKeys.filter((key) => indices.has(key));
+    // Collapsed groups keep their compact shape in Active; pinning or settling
+    // reveals every member as an independent row, just like the committed list.
+    const projectedMembers =
+      isGroup && target.section === "active" ? visibleMemberKeys : memberKeys;
+    for (const key of projectedMembers) {
+      const rank = ranks.get(key) ?? Number.POSITIVE_INFINITY;
+      const index = group.findIndex(
+        (item) => (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
+      );
+      group.splice(index < 0 ? group.length : index, 0, {
+        kind: "thread",
+        key,
+        section: target.section,
+      });
+    }
     const settledOrder = (
       input.settledOrder.length > 0 ? input.settledOrder : groups.settled.map((item) => item.key)
-    ).filter((key) => key !== active.key || target.section === "settled");
+    ).filter((key) => !movingKeys.has(key) || target.section === "settled");
     const visible = input.settledExpanded
       ? settledOrder.slice(0, input.settledVisibleCount ?? settledOrder.length)
       : [];
@@ -268,7 +263,9 @@ export function createSidebarSortingStrategy(input: {
     }
     if (
       groups.snoozed.length > 0 ||
-      ((active.section !== "snoozed" || (input.snoozedThreadCount ?? 0) > 1) &&
+      ((active.kind === "branch-header" ||
+        active.section !== "snoozed" ||
+        (input.snoozedThreadCount ?? 0) > 1) &&
         items.some((item) => item.kind === "marker" && item.marker === "snoozed-header"))
     ) {
       marker("snoozed-header");
@@ -284,7 +281,7 @@ export function createSidebarSortingStrategy(input: {
         (item.section === "pinned" || item.section === "active" || item.section === "working")
           ? cardHeight
           : slimHeight;
-      const moved = item.kind === "thread" && item.key === active.key;
+      const moved = item.kind === "thread" && movingKeys.has(item.key);
       return item.kind === "marker" &&
         (item.marker === "pinned-header" || item.marker === "pinned-divider")
         ? labelHeight
@@ -319,7 +316,12 @@ export function createSidebarSortingStrategy(input: {
       if (index !== undefined && rect) result[index] = { ...stationary, y: top - rect.top };
       top += heights[projectedIndex]! + 1;
     }
-    result[activeIndex] = stationary;
+    if (isGroup) {
+      result[activeIndex] = hidden;
+      for (const [index, item] of items.entries()) {
+        if (item.kind === "thread" && movingKeys.has(item.key)) result[index] = hidden;
+      }
+    } else result[activeIndex] = stationary;
     return result;
   }
 
