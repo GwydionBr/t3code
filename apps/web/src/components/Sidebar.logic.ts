@@ -1,4 +1,5 @@
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
 import {
@@ -7,6 +8,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import { isThreadWorking } from "@t3tools/client-runtime/state/thread-inbox";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
@@ -384,6 +386,34 @@ function activeBranchBlockOrder(
 
 function sameOrder(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+/** Eligible rows between the pressed action and the pointer, in sidebar order. */
+export function resolveSidebarSweepKeys(
+  orderedKeys: readonly string[],
+  originKey: string,
+  targetKey: string,
+  canApply: (key: string) => boolean,
+): string[] {
+  const origin = orderedKeys.indexOf(originKey);
+  const target = orderedKeys.indexOf(targetKey);
+  if (origin === -1 || target === -1) return [];
+  return orderedKeys.slice(Math.min(origin, target), Math.max(origin, target) + 1).filter(canApply);
+}
+
+/** The thread row at a pointer height, clamped to the rows visible in the
+    sidebar's scroll viewport. A gap between rows resolves to the row above
+    it. Rows carry their key in data-thread-item, which departing motion
+    clones drop. */
+export function sidebarThreadKeyAtY(list: HTMLElement, y: number): string | null {
+  const viewport = list.closest('[data-slot="scroll-area-viewport"]')?.getBoundingClientRect();
+  const visibleY = viewport ? Math.min(Math.max(y, viewport.top), viewport.bottom - 1) : y;
+  let key: string | null = null;
+  for (const row of list.querySelectorAll<HTMLElement>("li[data-thread-item]")) {
+    if (key !== null && row.getBoundingClientRect().top > visibleY) break;
+    key = row.dataset.threadItem ?? null;
+  }
+  return key;
 }
 
 export function planSidebarThreadDrop(input: {
@@ -1281,9 +1311,10 @@ export function resolveThreadRowClassName(input: {
 // (approval), "in motion" (working), and "broken" (failed). Ready is the
 // unlabeled resting state — the agent stopped and is waiting on the user,
 // whether it finished, asked a question, or proposed a plan. Waiting
-// (runtime status "idle") is the agent stopped with background tasks still
-// open: not the user's turn yet, so it renders grey like working, not as a
-// false Done.
+// (runtime status "idle") is the agent stopped with background work that will
+// wake it (subagents, monitors): not the user's turn yet, so it renders grey
+// like working, not as a false Done. Commands it left running, such as a dev
+// server, do not hold the thread; it reads as ready.
 // Unread completion is tracked separately: it describes whether a ready
 // thread needs attention, not what the thread is currently doing.
 export type SidebarThreadStatus =
@@ -1430,21 +1461,6 @@ export function shouldShowSidebarV2Duration(status: SidebarThreadStatus): boolea
   return status === "working";
 }
 
-/** Working beta: threads busy with work that does not need the user fold into
-    the Working shelf: a running run, or one stopped with background tasks
-    still open. Approvals, questions, plan prompts, and failures stay in the
-    inbox. */
-export function isSidebarThreadWorking(thread: ThreadStatusInput): boolean {
-  const status = resolveSidebarThreadStatus(thread);
-  if (status !== "working" && status !== "waiting") return false;
-  // A plan prompt outranks lingering background work: the user has to act on it.
-  return !(
-    thread.interactionMode === "plan" &&
-    thread.hasActionableProposedPlan &&
-    isLatestRunSettled(thread.latestRun, thread.runtime)
-  );
-}
-
 /** First VALID timestamp wins: `a ?? b` falls through on null, but a present-
     yet-malformed string must also fall through to the next candidate rather
     than sink the row to the epoch. */
@@ -1475,6 +1491,12 @@ export function sortThreadsForSidebar<
 >(threads: readonly T[]): T[] {
   return sortActiveThreadsByBranch(threads);
 }
+// The Working section beta folds and orders the inbox the same way on mobile.
+export {
+  isThreadWorking as isSidebarThreadWorking,
+  sortInboxThreadsByReturn,
+  sortWorkingThreadsBySend,
+} from "@t3tools/client-runtime/state/thread-inbox";
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
@@ -1556,41 +1578,6 @@ export function reduceSidebarProjectScopeMenuState(
   }
 }
 
-/** Working beta: the inbox lists threads newest first by when each last came
-    back to the user, so a thread that leaves the Working shelf lands on top.
-    Branch groups stay together at their newest member's slot.
-    `observedReturnAt` adds returns the server does not stamp, such as an
-    approval request mid-turn or background work ending. */
-export function sortInboxThreadsByReturn<
-  T extends Pick<
-    SidebarThreadSummary,
-    "id" | "environmentId" | "createdAt" | "unsettledAt" | "latestRun"
-  > & {
-    readonly projectId?: string | undefined;
-    readonly branch?: string | null | undefined;
-  },
->(threads: readonly T[], observedReturnAt?: (thread: T) => number | undefined): T[] {
-  const timestamps = new Map(
-    threads.map((thread) => [
-      thread,
-      Math.max(
-        toSortableTimestamp(thread.createdAt) ?? 0,
-        toSortableTimestamp(thread.unsettledAt ?? undefined) ?? 0,
-        toSortableTimestamp(thread.latestRun?.requestedAt ?? undefined) ?? 0,
-        toSortableTimestamp(thread.latestRun?.completedAt ?? undefined) ?? 0,
-        observedReturnAt?.(thread) ?? 0,
-      ),
-    ]),
-  );
-  const sorted = [...threads].sort(
-    (left, right) =>
-      timestamps.get(right)! - timestamps.get(left)! ||
-      left.id.localeCompare(right.id) ||
-      left.environmentId.localeCompare(right.environmentId),
-  );
-  return groupThreadsByBranch(sorted).flatMap((group) => group.threads);
-}
-
 /** Working beta: a branch group works as a unit, so one working member folds
     the whole group into the Working shelf and it returns to the inbox together. */
 export function partitionInboxByWorkingGroup<
@@ -1601,9 +1588,7 @@ export function partitionInboxByWorkingGroup<
     readonly branch?: string | null | undefined;
   },
 >(threads: readonly T[]): { readonly active: T[]; readonly working: T[] } {
-  const workingGroups = new Set(
-    threads.filter(isSidebarThreadWorking).map(activeThreadBranchGroupKey),
-  );
+  const workingGroups = new Set(threads.filter(isThreadWorking).map(activeThreadBranchGroupKey));
   const active: T[] = [];
   const working: T[] = [];
   for (const thread of threads) {
@@ -1674,7 +1659,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) {
+  if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) {
     return {
       label: "Waiting",
       colorClass: "text-sidebar-muted-foreground",
