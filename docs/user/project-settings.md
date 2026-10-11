@@ -151,7 +151,8 @@ captures and log retention remain machine-wide.
 
 Worktrees can be removed after a chosen number of inactive days, after merging, or when they
 have no commits beyond the default branch. Only T3-managed worktrees are eligible. Active
-sessions and shared worktrees prevent removal. **Keep worktrees with local changes** defaults
+sessions and worktrees shared by several threads prevent removal; a thread's subagents do not
+count as sharing. **Keep worktrees with local changes** defaults
 to **Uncommitted changes**, which protects tracked edits and untracked files but deletes ignored
 files such as `.env` and build output. **Any local files** also protects ignored files other than
 `node_modules`. **Edited tracked files** protects only tracked edits and allows untracked and

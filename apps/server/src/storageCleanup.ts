@@ -99,9 +99,11 @@ function sameProjectWorktreePolicies(left: ServerSettings, right: ServerSettings
 
 /** Live sessions keep their cwd even when no turn is currently running. */
 export function storageCleanupThreadIdle(thread: OrchestrationV2ThreadShell, now: number): boolean {
+  return thread.branch !== null && thread.worktreePath !== null && threadSettled(thread, now);
+}
+
+function threadSettled(thread: OrchestrationV2ThreadShell, now: number): boolean {
   return (
-    thread.branch !== null &&
-    thread.worktreePath !== null &&
     thread.activeRunId === null &&
     (thread.status === "idle" ||
       thread.status === "completed" ||
@@ -113,6 +115,18 @@ export function storageCleanupThreadIdle(thread: OrchestrationV2ThreadShell, now
     thread.pendingRuntimeRequest === null &&
     !threadHasQueuedTurnStart(thread, now)
   );
+}
+
+/**
+ * Subagent threads run in their parent's checkout. They hold it while busy but
+ * never own it, and outlive a deleted parent.
+ */
+function isSubagent(thread: Pick<OrchestrationV2ThreadShell, "lineage">): boolean {
+  return thread.lineage.relationshipToParent === "subagent";
+}
+
+function subagentBusy(threads: ReadonlyArray<OrchestrationV2ThreadShell>, now: number): boolean {
+  return threads.some((thread) => isSubagent(thread) && !threadSettled(thread, now));
 }
 
 /** PR metadata refreshes must not reset the inactivity clock. */
@@ -423,13 +437,21 @@ const make = Effect.gen(function* () {
     )).filter((thread) => thread.worktreePath !== null && thread.branch !== null);
     const snapshot = yield* readThreads();
     const refreshedDefaultRefs = new Map<string, Set<string>>();
-    const groups = Map.groupBy(
-      snapshot.threads.filter((thread) => thread.worktreePath !== null),
-      (thread) => path.resolve(thread.worktreePath!),
-    );
+    const byPath = <T extends { readonly worktreePath: string | null }>(
+      threads: ReadonlyArray<T>,
+    ) =>
+      Map.groupBy(
+        threads.filter((thread) => thread.worktreePath !== null),
+        (thread) => path.resolve(thread.worktreePath!),
+      );
+    // Owners only: a parent and its subagents count as one thread.
+    const groups = byPath(snapshot.threads.filter((thread) => !isSubagent(thread)));
+    const occupants = byPath(snapshot.threads);
     const candidates = [
       ...[...groups.values()].map((group) => group[0]!),
-      ...deletedThreads.filter((thread) => !groups.has(path.resolve(thread.worktreePath!))),
+      ...deletedThreads.filter(
+        (thread) => !isSubagent(thread) && !groups.has(path.resolve(thread.worktreePath!)),
+      ),
     ];
     for (const thread of candidates) {
       const settings = resolveWorktreeCleanup(serverSettings, thread.projectId);
@@ -458,6 +480,8 @@ const make = Effect.gen(function* () {
         if (project === undefined) return keep("project is unavailable");
         if (!deleted && !storageCleanupThreadIdle(thread, now))
           return keep("thread is running or has pending work");
+        if (subagentBusy(occupants.get(worktreePath) ?? [], now))
+          return keep("subagent is running or has pending work");
         if (hasTerminal(worktreePath)) return keep("open terminal");
         // Roots are canonical, so compare canonical paths. A symlinked parent
         // (a linked drive) is fine; a symlinked worktree directory is not.
@@ -543,11 +567,13 @@ const make = Effect.gen(function* () {
           const latestSnapshot = yield* readThreads();
           if (yield* containsProjectRoot(worktreePath, [project, ...latestSnapshot.projects]))
             return "contains a project checkout";
-          const latest = latestSnapshot.threads.filter(
+          const latestOccupants = latestSnapshot.threads.filter(
             (entry) =>
               entry.worktreePath !== null && path.resolve(entry.worktreePath) === worktreePath,
           );
+          const latest = latestOccupants.filter((entry) => !isSubagent(entry));
           if (hasTerminal(worktreePath)) return "open terminal";
+          if (subagentBusy(latestOccupants, now)) return "subagent is running or has pending work";
           if (deleted) {
             if (
               latest.length > 0 ||

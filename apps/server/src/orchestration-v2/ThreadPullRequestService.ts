@@ -139,6 +139,47 @@ export const make = Effect.gen(function* () {
           return { snapshotSequence, threads: thread === null ? [] : [thread] };
         });
 
+  /**
+   * Agents often move a worktree thread's checkout to a branch of their own.
+   * Follow it, so pull request discovery, settlement and worktree cleanup look
+   * at the branch the work is on. A project checkout stays the user's, and a
+   * detached HEAD or the default branch is never adopted.
+   */
+  const adoptCheckedOutBranch = Effect.fn("ThreadPullRequestServiceV2.adoptCheckedOutBranch")(
+    function* (thread: OrchestrationV2ThreadShell) {
+      if (
+        thread.worktreePath === null ||
+        thread.lineage.relationshipToParent === "subagent" ||
+        !(yield* fileSystem.exists(thread.worktreePath))
+      )
+        return false;
+      const local = yield* git.localStatus({ cwd: thread.worktreePath });
+      if (
+        !local.isRepo ||
+        local.refName === null ||
+        local.isDefaultRef ||
+        local.refName === thread.branch
+      )
+        return false;
+      const uuid = yield* crypto.randomUUIDv4;
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`server:thread-branch:${thread.id}:${uuid}`),
+        threadId: thread.id,
+        branch: local.refName,
+        expectedWorktreePath: thread.worktreePath,
+      });
+      return true;
+    },
+    Effect.catchCauseIf(
+      (cause) => !Cause.hasInterruptsOnly(cause),
+      (cause) =>
+        Effect.logWarning("thread branch adoption failed", { cause: Cause.pretty(cause) }).pipe(
+          Effect.as(false),
+        ),
+    ),
+  );
+
   const synchronize = Effect.fn("ThreadPullRequestServiceV2.synchronize")(function* (
     request: RefreshRequest,
   ) {
@@ -146,6 +187,11 @@ export const make = Effect.gen(function* () {
       readThreadSnapshot(request),
       projectStore.listShells(),
     ]);
+    // After a turn, before discovery. An adopted branch updates the thread,
+    // whose metadata event queues discovery for the new branch.
+    const finishedThread =
+      request.refresh && request.threadId !== null && threadSnapshot.threads[0];
+    if (finishedThread && (yield* adoptCheckedOutBranch(finishedThread))) return;
     const projects = new Map(projectShells.map((project) => [project.id, project]));
     if (request.backfill) {
       for (const thread of threadSnapshot.threads) {

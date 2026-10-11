@@ -474,6 +474,42 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live("treats a parent and its subagents as one owner of the worktree", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree, setThreads } = yield* cleanupFixture;
+        const parent = shell({ branch: "feature", worktreePath: worktree });
+        const subagent = shell({
+          id: ThreadId.make("subagent-1"),
+          branch: "feature",
+          worktreePath: worktree,
+          lineage: {
+            rootThreadId: parent.id,
+            parentThreadId: parent.id,
+            relationshipToParent: "subagent",
+          },
+        });
+        const second = shell({
+          id: ThreadId.make("thread-2"),
+          branch: "feature",
+          worktreePath: worktree,
+        });
+        setThreads([parent, subagent, second]);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Shared by 2 threads",
+        });
+        setThreads([parent, { ...subagent, activeRunId: RunId.make("run-1"), status: "running" }]);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Subagent is running or has pending work",
+        });
+        setThreads([parent, subagent]);
+        expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(yield* fs.exists(worktree)).toBe(false);
+      }),
+    ),
+  );
   it.live("compares the checked-out branch without a full status", () =>
     runCleanupTest(
       Effect.gen(function* () {
