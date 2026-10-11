@@ -473,7 +473,7 @@ const make = Effect.gen(function* () {
         // leftover folder whose .git is gone.
         const gitEntry = yield* fs
           .stat(path.join(worktreePath, ".git"))
-          .pipe(Effect.orElseSucceed(() => null));
+          .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(null)));
         if (gitEntry?.type !== "File") return keep("not a linked worktree");
         if (yield* branchChanged(worktreePath, thread.branch))
           return keep("repository or branch changed");
