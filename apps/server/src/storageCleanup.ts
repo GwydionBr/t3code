@@ -469,9 +469,12 @@ const make = Effect.gen(function* () {
           return keep("outside the managed worktree folder");
         if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
           return keep("contains a project checkout");
-        // A linked worktree has a .git file. Never remove a main checkout.
-        if ((yield* fs.stat(path.join(worktreePath, ".git"))).type !== "File")
-          return keep("not a linked worktree");
+        // A linked worktree has a .git file. Never remove a main checkout, nor a
+        // leftover folder whose .git is gone.
+        const gitEntry = yield* fs
+          .stat(path.join(worktreePath, ".git"))
+          .pipe(Effect.orElseSucceed(() => null));
+        if (gitEntry?.type !== "File") return keep("not a linked worktree");
         if (yield* branchChanged(worktreePath, thread.branch))
           return keep("repository or branch changed");
         const changes = yield* localChangesReason(worktreePath, settings);

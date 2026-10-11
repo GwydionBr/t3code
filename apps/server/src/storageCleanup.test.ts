@@ -510,6 +510,19 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live("keeps a leftover folder whose .git is gone instead of failing", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree } = yield* cleanupFixture;
+        yield* fs.remove(`${worktree}/.git`);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Not a linked worktree",
+        });
+        expect(yield* fs.exists(worktree)).toBe(true);
+      }),
+    ),
+  );
   it("decodes reports from servers without size fields", () => {
     const report = decodeCleanupReport({
       trigger: "manual",
