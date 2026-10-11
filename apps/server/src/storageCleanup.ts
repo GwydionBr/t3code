@@ -1,5 +1,6 @@
 import {
   GitCommandError,
+  isProviderNativeSubagentThread,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
@@ -118,12 +119,11 @@ function threadSettled(thread: OrchestrationV2ThreadShell, now: number): boolean
 }
 
 /**
- * Subagent threads run in their parent's checkout. They hold it while busy but
- * never own it, and outlive a deleted parent.
+ * Provider-native subagents run in their parent's checkout and take no turns of
+ * their own. They hold it while busy but never own it, and outlive a deleted
+ * parent. Delegated tasks can resume on their own, so they stay owners.
  */
-function isSubagent(thread: Pick<OrchestrationV2ThreadShell, "lineage">): boolean {
-  return thread.lineage.relationshipToParent === "subagent";
-}
+const isSubagent = isProviderNativeSubagentThread;
 
 function subagentBusy(threads: ReadonlyArray<OrchestrationV2ThreadShell>, now: number): boolean {
   return threads.some((thread) => isSubagent(thread) && !threadSettled(thread, now));
@@ -574,6 +574,14 @@ const make = Effect.gen(function* () {
           const latest = latestOccupants.filter((entry) => !isSubagent(entry));
           if (hasTerminal(worktreePath)) return "open terminal";
           if (subagentBusy(latestOccupants, now)) return "subagent is running or has pending work";
+          // A finished subagent run can still have its checkpoint queued.
+          for (const subagent of latestOccupants.filter(isSubagent)) {
+            const pendingEffects = yield* sql`
+              SELECT 1 FROM orchestration_v2_effect_outbox
+              WHERE thread_id = ${subagent.id} AND status NOT IN ('succeeded', 'cancelled') LIMIT 1
+            `;
+            if (pendingEffects.length > 0) return "subagent is running or has pending work";
+          }
           if (deleted) {
             if (
               latest.length > 0 ||

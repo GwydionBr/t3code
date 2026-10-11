@@ -361,25 +361,30 @@ describe("ThreadPullRequestServiceV2 branch adoption", () => {
     ...overrides,
   });
 
-  // Runs one finished turn for the thread and returns the commands it caused.
+  // Runs one finished turn for the thread, or only server startup, and
+  // returns the commands it caused.
   const finishTurn = (
     shell: OrchestrationV2ThreadShell,
     checkout: { readonly refName: string | null; readonly isDefaultRef: boolean },
+    options: { readonly startupOnly?: boolean } = {},
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
         const events = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
         const commands: Array<Parameters<Orchestrator.OrchestratorV2Shape["dispatch"]>[0]> = [];
+        const startupRead = yield* Deferred.make<void>();
         const layerDependencies = Layer.mergeAll(
           Layer.mock(Orchestrator.OrchestratorV2)({
             streamDomainEvents: Stream.fromPubSub(events),
             getShellSnapshot: () =>
-              Effect.succeed({
-                schemaVersion: 2,
-                snapshotSequence: 1,
-                threads: [],
-                archivedThreads: [],
-              }),
+              Deferred.succeed(startupRead, undefined).pipe(
+                Effect.as({
+                  schemaVersion: 2,
+                  snapshotSequence: 1,
+                  threads: options.startupOnly ? [shell] : [],
+                  archivedThreads: [],
+                }),
+              ),
             getThreadEventSequence: () => Effect.succeed(1),
             getThreadShell: () => Effect.succeed(shell),
             dispatch: (command) =>
@@ -389,6 +394,7 @@ describe("ThreadPullRequestServiceV2 branch adoption", () => {
           }),
           Layer.mock(ProjectStore.ProjectStoreV2)({ listShells: () => Effect.succeed([]) }),
           Layer.mock(GitManager.GitManager)({
+            invalidateLocalStatus: () => Effect.void,
             localStatus: () =>
               Effect.succeed({
                 isRepo: true,
@@ -413,7 +419,9 @@ describe("ThreadPullRequestServiceV2 branch adoption", () => {
         return yield* Effect.gen(function* () {
           const service = yield* ThreadPullRequestService.make;
           yield* service.start();
+          yield* Deferred.await(startupRead);
           yield* service.drain;
+          if (options.startupOnly) return commands;
           // Only the event's type and thread matter to the worker.
           yield* PubSub.publish(events, {
             type: "checkpoint.captured",
@@ -444,6 +452,19 @@ describe("ThreadPullRequestServiceV2 branch adoption", () => {
     }),
   );
 
+  it.effect("catches up on a branch that moved before the server started", () =>
+    Effect.gen(function* () {
+      const commands = yield* finishTurn(
+        thread({}),
+        { refName: "feat/agent-branch", isDefaultRef: false },
+        { startupOnly: true },
+      );
+      expect(commands).toMatchObject([
+        { type: "thread.metadata.update", branch: "feat/agent-branch" },
+      ]);
+    }),
+  );
+
   it.effect("leaves project checkouts, subagents, the default branch and detached HEADs", () =>
     Effect.gen(function* () {
       const agentBranch = { refName: "feat/agent-branch", isDefaultRef: false };
@@ -456,6 +477,8 @@ describe("ThreadPullRequestServiceV2 branch adoption", () => {
               parentThreadId: ThreadId.make("parent"),
               relationshipToParent: "subagent",
             },
+            createdBy: "agent",
+            creationSource: "provider",
           }),
           agentBranch,
         ),
