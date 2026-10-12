@@ -320,3 +320,171 @@ describe("ThreadPullRequestServiceV2 reads", () => {
     ),
   );
 });
+
+describe("ThreadPullRequestServiceV2 branch adoption", () => {
+  const NOW = DateTime.makeUnsafe("2026-09-20T00:00:00.000Z");
+  const thread = (overrides: Partial<OrchestrationV2ThreadShell>): OrchestrationV2ThreadShell => ({
+    id: ThreadId.make("thread-1"),
+    projectId: ProjectId.make("project-1"),
+    title: "Thread",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: "t3/1234abcd",
+    worktreePath: "/worktrees/t3-1234abcd",
+    activeProviderThreadId: null,
+    lineage: {
+      rootThreadId: ThreadId.make("thread-1"),
+      parentThreadId: null,
+      relationshipToParent: null,
+    },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "web",
+    activeRunId: null,
+    latestRunId: null,
+    status: "completed",
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: null,
+    hasActionableProposedPlan: false,
+    itemCount: 0,
+    visibleItemCount: 0,
+    createdAt: NOW,
+    updatedAt: NOW,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    lastVisitedAt: null,
+    deletedAt: null,
+    ...overrides,
+  });
+
+  // Runs one finished turn for the thread, or only server startup, and
+  // returns the commands it caused.
+  const finishTurn = (
+    shell: OrchestrationV2ThreadShell,
+    checkout: { readonly refName: string | null; readonly isDefaultRef: boolean },
+    options: { readonly startupOnly?: boolean } = {},
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const events = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
+        const commands: Array<Parameters<Orchestrator.OrchestratorV2Shape["dispatch"]>[0]> = [];
+        const startupRead = yield* Deferred.make<void>();
+        const layerDependencies = Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            streamDomainEvents: Stream.fromPubSub(events),
+            getShellSnapshot: () =>
+              Deferred.succeed(startupRead, undefined).pipe(
+                Effect.as({
+                  schemaVersion: 2,
+                  snapshotSequence: 1,
+                  threads: options.startupOnly ? [shell] : [],
+                  archivedThreads: [],
+                }),
+              ),
+            getThreadEventSequence: () => Effect.succeed(1),
+            getThreadShell: () => Effect.succeed(shell),
+            dispatch: (command) =>
+              Effect.sync(() => commands.push(command)).pipe(
+                Effect.as({ sequence: 1, storedEvents: [] }),
+              ),
+          }),
+          Layer.mock(ProjectStore.ProjectStoreV2)({ listShells: () => Effect.succeed([]) }),
+          Layer.mock(GitManager.GitManager)({
+            invalidateLocalStatus: () => Effect.void,
+            localStatus: () =>
+              Effect.succeed({
+                isRepo: true,
+                hasPrimaryRemote: true,
+                hasWorkingTreeChanges: false,
+                workingTree: { files: [], insertions: 0, deletions: 0 },
+                ...checkout,
+              }),
+          }),
+          Layer.mock(PullRequestService.PullRequestService)({}),
+          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
+          Layer.succeed(ServerActivation.ServerActivation, Effect.void),
+          Layer.succeed(
+            Crypto.Crypto,
+            Crypto.make({
+              randomBytes: (size) => new Uint8Array(size).fill(1),
+              digest: (_algorithm, data) => Effect.succeed(data),
+            }),
+          ),
+          FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
+        );
+        return yield* Effect.gen(function* () {
+          const service = yield* ThreadPullRequestService.make;
+          yield* service.start();
+          yield* Deferred.await(startupRead);
+          yield* service.drain;
+          if (options.startupOnly) return commands;
+          // Only the event's type and thread matter to the worker.
+          yield* PubSub.publish(events, {
+            type: "checkpoint.captured",
+            id: EventId.make("event:checkpoint"),
+            threadId: shell.id,
+            occurredAt: NOW,
+          } as unknown as OrchestrationV2DomainEvent);
+          yield* service.drain;
+          return commands;
+        }).pipe(Effect.provide(layerDependencies));
+      }),
+    );
+
+  it.effect("follows a branch the agent checked out in the thread's worktree", () =>
+    Effect.gen(function* () {
+      const commands = yield* finishTurn(thread({}), {
+        refName: "feat/agent-branch",
+        isDefaultRef: false,
+      });
+      expect(commands).toMatchObject([
+        {
+          type: "thread.metadata.update",
+          threadId: "thread-1",
+          branch: "feat/agent-branch",
+          expectedWorktreePath: "/worktrees/t3-1234abcd",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("catches up on a branch that moved before the server started", () =>
+    Effect.gen(function* () {
+      const commands = yield* finishTurn(
+        thread({}),
+        { refName: "feat/agent-branch", isDefaultRef: false },
+        { startupOnly: true },
+      );
+      expect(commands).toMatchObject([
+        { type: "thread.metadata.update", branch: "feat/agent-branch" },
+      ]);
+    }),
+  );
+
+  it.effect("leaves project checkouts, subagents, the default branch and detached HEADs", () =>
+    Effect.gen(function* () {
+      const agentBranch = { refName: "feat/agent-branch", isDefaultRef: false };
+      expect(yield* finishTurn(thread({ worktreePath: null }), agentBranch)).toEqual([]);
+      expect(
+        yield* finishTurn(
+          thread({
+            lineage: {
+              rootThreadId: ThreadId.make("parent"),
+              parentThreadId: ThreadId.make("parent"),
+              relationshipToParent: "subagent",
+            },
+            createdBy: "agent",
+            creationSource: "provider",
+          }),
+          agentBranch,
+        ),
+      ).toEqual([]);
+      expect(yield* finishTurn(thread({}), { refName: "main", isDefaultRef: true })).toEqual([]);
+      expect(yield* finishTurn(thread({}), { refName: null, isDefaultRef: false })).toEqual([]);
+    }),
+  );
+});

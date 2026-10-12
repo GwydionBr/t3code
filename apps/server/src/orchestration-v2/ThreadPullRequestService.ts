@@ -4,6 +4,7 @@ import {
 } from "@t3tools/shared/sourceControl";
 import {
   CommandId,
+  isProviderNativeSubagentThread,
   type OrchestrationProjectShell,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
@@ -139,13 +140,65 @@ export const make = Effect.gen(function* () {
           return { snapshotSequence, threads: thread === null ? [] : [thread] };
         });
 
+  /**
+   * Agents often move a worktree thread's checkout to a branch of their own.
+   * Follow it, so pull request discovery, settlement and worktree cleanup look
+   * at the branch the work is on. A project checkout stays the user's, and a
+   * detached HEAD or the default branch is never adopted. Native subagents take
+   * no turns of their own, so their parent's branch is the one that matters.
+   */
+  const adoptCheckedOutBranch = Effect.fn("ThreadPullRequestServiceV2.adoptCheckedOutBranch")(
+    function* (thread: OrchestrationV2ThreadShell) {
+      if (
+        thread.worktreePath === null ||
+        isProviderNativeSubagentThread(thread) ||
+        !(yield* fileSystem.exists(thread.worktreePath))
+      )
+        return;
+      // The status cache can predate the agent's last checkout.
+      yield* git.invalidateLocalStatus(thread.worktreePath);
+      const local = yield* git.localStatus({ cwd: thread.worktreePath });
+      if (
+        !local.isRepo ||
+        local.refName === null ||
+        local.isDefaultRef ||
+        local.refName === thread.branch
+      )
+        return;
+      const uuid = yield* crypto.randomUUIDv4;
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`server:thread-branch:${thread.id}:${uuid}`),
+        threadId: thread.id,
+        branch: local.refName,
+        expectedWorktreePath: thread.worktreePath,
+      });
+    },
+    Effect.catchCauseIf(
+      (cause) => !Cause.hasInterruptsOnly(cause),
+      (cause) => Effect.logWarning("thread branch adoption failed", { cause: Cause.pretty(cause) }),
+    ),
+  );
+
   const synchronize = Effect.fn("ThreadPullRequestServiceV2.synchronize")(function* (
     request: RefreshRequest,
   ) {
+    // After a turn, adopt before the snapshot so discovery reads the new branch.
+    if (request.refresh && request.threadId !== null) {
+      const finished = yield* orchestrator.getThreadShell(request.threadId);
+      if (finished !== null) yield* adoptCheckedOutBranch(finished);
+    }
     const [threadSnapshot, projectShells] = yield* Effect.all([
       readThreadSnapshot(request),
       projectStore.listShells(),
     ]);
+    // Startup also catches up threads whose branch moved before this ran.
+    if (request.backfill) {
+      yield* Effect.forEach(threadSnapshot.threads, adoptCheckedOutBranch, {
+        concurrency: 4,
+        discard: true,
+      });
+    }
     const projects = new Map(projectShells.map((project) => [project.id, project]));
     if (request.backfill) {
       for (const thread of threadSnapshot.threads) {
