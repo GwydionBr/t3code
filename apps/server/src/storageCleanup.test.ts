@@ -251,6 +251,7 @@ const cleanupFixture = Effect.gen(function* () {
   let threads = [shell({ branch: "feature", worktreePath: worktree })];
   let editBeforeRemoval = false;
   let openSessionCwd: string | null = null;
+  let pendingEffectThreadId: string | null = null;
   let fullStatusCalls = 0;
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
     Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -280,26 +281,33 @@ const cleanupFixture = Effect.gen(function* () {
     Effect.provideService(Orchestrator.OrchestratorV2, {
       streamDomainEvents: Stream.empty,
     } as unknown as Orchestrator.OrchestratorV2["Service"]),
-    Effect.provideService(SqlClient.SqlClient, ((strings: TemplateStringsArray) =>
+    Effect.provideService(SqlClient.SqlClient, ((
+      strings: TemplateStringsArray,
+      ...values: Array<unknown>
+    ) =>
       Effect.sync(() =>
-        openSessionCwd !== null && strings.join("").includes("projection_provider_sessions")
-          ? [
-              {
-                payload_json: JSON.stringify({
-                  id: "session-1",
-                  driver: "codex",
-                  providerInstanceId: "codex",
-                  status: "ready",
-                  cwd: openSessionCwd,
-                  model: null,
-                  capabilities: CodexProviderCapabilitiesV2,
-                  createdAt: "2026-06-01T12:00:00.000Z",
-                  updatedAt: "2026-06-01T12:00:00.000Z",
-                  lastError: null,
-                }),
-              },
-            ]
-          : [],
+        pendingEffectThreadId !== null &&
+        strings.join("").includes("effect_outbox") &&
+        values.includes(pendingEffectThreadId)
+          ? [{ pending: 1 }]
+          : openSessionCwd !== null && strings.join("").includes("projection_provider_sessions")
+            ? [
+                {
+                  payload_json: JSON.stringify({
+                    id: "session-1",
+                    driver: "codex",
+                    providerInstanceId: "codex",
+                    status: "ready",
+                    cwd: openSessionCwd,
+                    model: null,
+                    capabilities: CodexProviderCapabilitiesV2,
+                    createdAt: "2026-06-01T12:00:00.000Z",
+                    updatedAt: "2026-06-01T12:00:00.000Z",
+                    lastError: null,
+                  }),
+                },
+              ]
+            : [],
       )) as unknown as SqlClient.SqlClient),
     Effect.provideService(GitManager.GitManager, {
       invalidateStatus: () => Effect.void,
@@ -342,6 +350,9 @@ const cleanupFixture = Effect.gen(function* () {
     },
     setOpenSessionCwd: (cwd: string | null) => {
       openSessionCwd = cwd;
+    },
+    setPendingEffectThreadId: (threadId: string | null) => {
+      pendingEffectThreadId = threadId;
     },
     fullStatusCalls: () => fullStatusCalls,
   };
@@ -472,6 +483,57 @@ describe("storage cleanup reports and local file policies", () => {
         expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
         expect(removed.entries[0]?.bytes).toBeGreaterThan(0);
         expect(walked).toContain(root);
+      }),
+    ),
+  );
+  it.live("treats a parent and its subagents as one owner of the worktree", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree, setThreads, setPendingEffectThreadId } =
+          yield* cleanupFixture;
+        const parent = shell({ branch: "feature", worktreePath: worktree });
+        const lineage = {
+          rootThreadId: parent.id,
+          parentThreadId: parent.id,
+          relationshipToParent: "subagent" as const,
+        };
+        const subagent = shell({
+          id: ThreadId.make("subagent-1"),
+          branch: "feature",
+          worktreePath: worktree,
+          lineage,
+          createdBy: "agent",
+          creationSource: "provider",
+        });
+        // A delegated task can take turns of its own, so it still shares.
+        const delegated = shell({
+          id: ThreadId.make("delegated-1"),
+          branch: "feature",
+          worktreePath: worktree,
+          lineage,
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        setThreads([parent, subagent, delegated]);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Shared by 2 threads",
+        });
+        setThreads([parent, { ...subagent, activeRunId: RunId.make("run-1"), status: "running" }]);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Subagent is running or has pending work",
+        });
+        setThreads([parent, subagent]);
+        // Its finished run can still have a checkpoint capture queued.
+        setPendingEffectThreadId(subagent.id);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Subagent is running or has pending work",
+        });
+        setPendingEffectThreadId(null);
+        expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(yield* fs.exists(worktree)).toBe(false);
       }),
     ),
   );
