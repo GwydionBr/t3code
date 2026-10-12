@@ -5,6 +5,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as PlatformError from "effect/PlatformError";
 import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -507,6 +508,44 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
         expect(fullStatusCalls()).toBe(0);
+      }),
+    ),
+  );
+  it.live("keeps a leftover folder whose .git is gone instead of failing", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree } = yield* cleanupFixture;
+        yield* fs.remove(`${worktree}/.git`);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Not a linked worktree",
+        });
+        expect(yield* fs.exists(worktree)).toBe(true);
+      }),
+    ),
+  );
+  it.live("reports a .git that cannot be read as a failure", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { service, worktree } = yield* cleanupFixture.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            stat: (target) =>
+              target.endsWith("/.git")
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "stat",
+                      pathOrDescriptor: target,
+                    }),
+                  )
+                : fs.stat(target),
+          }),
+        );
+        expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "failed" });
+        expect(yield* fs.exists(worktree)).toBe(true);
       }),
     ),
   );
