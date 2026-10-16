@@ -243,6 +243,10 @@ const signDesktopLocal = Effect.fn("signDesktopLocal")(function* (input: {
         identity,
         platform: "darwin",
         type: "development",
+        // Local signing never embeds a profile. The default scan stats every
+        // cwd entry, so a looping gitignored `.env` symlink (worktree setup)
+        // fails the whole sign with ELOOP.
+        preEmbedProvisioningProfile: false,
         optionsForFile: () => ({ hardenedRuntime: false, timestamp: "none" }),
       }),
     catch: (cause) => new SignDesktopError({ detail: `Signing failed: ${String(cause)}` }),
