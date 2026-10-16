@@ -1,3 +1,4 @@
+import { usePullRequestConnected } from "./usePullRequestConnected";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation } from "@react-navigation/native";
 import type { PullRequestAction, PullRequestDetail } from "@t3tools/contracts";
@@ -5,9 +6,9 @@ import Animated from "react-native-reanimated";
 import { PR_ROW_LAYOUT, PR_DISCLOSURE_ENTER, PR_ROW_EXIT } from "./pullRequestAnimations";
 import { useState } from "react";
 import { Linking, Pressable, View } from "react-native";
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
-import { ControlPillMenu } from "../../components/ControlPillMenu";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { Menu } from "../../components/ui/Menu";
 import { PullRequestAvatar } from "./PullRequestPresentation";
 import { PullRequestCardRow } from "./PullRequestControls";
 import { PullRequestAgentRow } from "./PullRequestAgentRow";
@@ -63,7 +64,7 @@ export function PullRequestStatusMenu(props: RowProps) {
   );
   if (!actions.length) return trigger;
   return (
-    <ControlPillMenu
+    <Menu
       title="Pull request status"
       actions={actions.map((id) => ({
         id,
@@ -90,7 +91,7 @@ export function PullRequestStatusMenu(props: RowProps) {
       }}
     >
       {trigger}
-    </ControlPillMenu>
+    </Menu>
   );
 }
 
@@ -208,7 +209,7 @@ export function PullRequestBranchRow(props: RowProps) {
   );
   if (!methods.length && !canResolve) return row;
   return (
-    <ControlPillMenu
+    <Menu
       title="Branch"
       actions={[
         ...(canResolve ? [agent.menuAction("conflicts")] : []),
@@ -221,7 +222,7 @@ export function PullRequestBranchRow(props: RowProps) {
       }}
     >
       {row}
-    </ControlPillMenu>
+    </Menu>
   );
 }
 
@@ -237,7 +238,9 @@ export function PullRequestReviewersRow(props: RowProps) {
       pullRequestTarget(props.params).environmentId,
     ),
   );
+  const connected = usePullRequestConnected(props.params.environmentId);
   const canRequest =
+    connected &&
     canWrite &&
     props.pr.state === "open" &&
     props.pr.capabilities.reviewers.request &&
